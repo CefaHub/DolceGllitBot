@@ -37,7 +37,18 @@ ADMINS = [5702167274, 5286390518]  # ← замените на реальные
 ALIASES: Dict[str, List[str]] = {
     "eunchae": ["eunchae", "ынче", "ынчэ"],
     "winter":  ["winter", "винтер", "винтэр"],
-    "yunjin":  ["yunjin", "юнджин", "юнжин"]
+    "yunjin":  ["yunjin", "юнджин", "юнжин"],
+    "kazuha":  ["кадзуха", "kazuha", "казуха"],
+    "chaewon":  ["чевон", "чэвон", "chaewon"],
+    "iroha":  ["ироха", "iroha"],
+    "leeseo":  ["leeseo", "лисо"],
+    "minju":  ["минджу", "minju"],
+    "moka":  ["moka", "мока"],
+    "rei":  ["рей", "rei"]
+    "sakura":  ["сакура", "sakura"],
+    "wonhee":  ["вонхи", "wonhee"],
+    "wonyoung":  ["вонён", "вонен", "wonyoung"],
+    "yunah":  ["yunah", "юна"]
 }
 
 logging.basicConfig(level=logging.INFO)
