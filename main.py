@@ -44,7 +44,7 @@ ALIASES: Dict[str, List[str]] = {
     "leeseo":  ["leeseo", "лисо"],
     "minju":  ["минджу", "minju"],
     "moka":  ["moka", "мока"],
-    "rei":  ["рей", "rei"]
+    "rei":  ["рей", "rei"],
     "sakura":  ["сакура", "sakura"],
     "wonhee":  ["вонхи", "wonhee"],
     "wonyoung":  ["вонён", "вонен", "wonyoung"],
