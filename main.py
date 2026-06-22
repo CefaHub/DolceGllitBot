@@ -37,18 +37,7 @@ ADMINS = [5702167274, 5286390518]  # ← замените на реальные
 ALIASES: Dict[str, List[str]] = {
     "eunchae": ["eunchae", "ынче", "ынчэ"],
     "winter":  ["winter", "винтер", "винтэр"],
-    "yunjin":  ["yunjin", "юнджин", "юнжин"],
-    "kazuha":  ["кадзуха", "kazuha", "казуха"],
-    "chaewon":  ["чевон", "чэвон", "chaewon"],
-    "iroha":  ["ироха", "iroha"],
-    "leeseo":  ["leeseo", "лисо"],
-    "minju":  ["минджу", "minju"],
-    "moka":  ["moka", "мока"],
-    "rei":  ["рей", "rei"],
-    "sakura":  ["сакура", "sakura"],
-    "wonhee":  ["вонхи", "wonhee"],
-    "wonyoung":  ["вонён", "вонен", "wonyoung"],
-    "yunah":  ["yunah", "юна"]
+    "yunjin":  ["yunjin", "юнджин", "юнжин"]
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -166,6 +155,7 @@ async def start_guess_round(chat_id: int, bot: Bot):
     game["photo_message_id"] = msg.message_id
     task = asyncio.create_task(timeout_task(chat_id, bot))
     game["timer_task"] = task
+    game["round_answered"] = False
 
 async def start_intuition_round(chat_id: int, bot: Bot):
     game = games[chat_id]
@@ -175,6 +165,7 @@ async def start_intuition_round(chat_id: int, bot: Bot):
     await bot.send_message(chat_id, f"🎭 *Интуиция* 🎭\n\n{desc}", parse_mode="Markdown")
     task = asyncio.create_task(timeout_task(chat_id, bot))
     game["timer_task"] = task
+    game["round_answered"] = False
 
 async def advance_game(chat_id: int, bot: Bot):
     game = games.get(chat_id)
@@ -329,30 +320,24 @@ async def process_photo(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, destination=img_path)
     await message.answer("📸 Фото сохранено. Можете отправить ещё или нажать «Готово».")
 
-@admin_router.callback_query(F.data == "photos_done", AddStates.waiting_for_photos)
-async def photos_done(callback: CallbackQuery, state: FSMContext):
+@admin_router.callback_query(F.data == "confirm_add", AddStates.confirmation)
+async def confirm_add(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    temp_dir = Path(data["temp_dir"])
-    photos = list(temp_dir.glob("*"))
-    if not photos:
-        await callback.message.answer("Вы не отправили ни одного фото. Отправьте хотя бы одно.")
-        return
-    aliases = data["aliases"]
     folder_name = data["folder_name"]
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_add")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_add")],
-    ])
-    await callback.message.answer(
-        f"📁 *Участник:* `{folder_name}`\n"
-        f"🔤 Варианты ответа: {', '.join(aliases)}\n"
-        f"🖼 Новых фото: {len(photos)} шт.\n\n"
-        f"Подтвердите добавление:",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-    await state.set_state(AddStates.confirmation)
+    temp_dir = Path(data["temp_dir"])
+    target_dir = Path(PHOTOS_BASE_DIR) / folder_name
+    # Гарантируем существование папки
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for f in temp_dir.iterdir():
+        shutil.move(str(f), str(target_dir / f.name))
+    shutil.rmtree(temp_dir)
+    aliases = data["aliases"]
+    ALIASES[folder_name] = aliases
+    global ALL_GUESS
+    ALL_GUESS = load_guess_photos()
+    await callback.message.answer(f"✅ Участник `{folder_name}` обновлён! Фото добавлены.")
+    await state.clear()
 
 @admin_router.callback_query(F.data == "confirm_add", AddStates.confirmation)
 async def confirm_add(callback: CallbackQuery, state: FSMContext):
@@ -453,7 +438,8 @@ async def cmd_guessgame(message: Message):
         "current_aliases": [],
         "photo_message_id": None,
         "timer_task": None,
-        "used_items": set()
+        "used_items": set(),
+        "round_answered": False
     }
     await message.answer("🎮 *Угадайка* 🎮\nВведите количество раундов (1–20):", parse_mode="Markdown")
 
@@ -480,6 +466,7 @@ async def cmd_intuition(message: Message):
         "current_aliases": [],
         "photo_message_id": None,
         "timer_task": None,
+        "round_answered": False
     }
     await message.answer("🎭 *Интуиция* 🎭\nВведите количество раундов (1–20):", parse_mode="Markdown")
 
@@ -493,21 +480,21 @@ async def cmd_stopdolce(message: Message):
     await message.answer("🛑 Останавливаю игру...")
     await end_game(chat_id, message.bot, stopped=True)
 
-@router.message(Command("dolcetop"))
+@router.message(Command("dolcetop"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_dolcetop(message: Message):
     scores = load_scores()
     if not scores:
         await message.answer("🏅 Пока никто не играл.")
         return
     top = sorted(scores.items(), key=lambda x: x[1]["score"], reverse=True)[:10]
-    lines = ["🏅 *Топ-10 игроков* 🏅"]
+    lines = ["🏅 Топ-10 игроков:"]
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     for i, (uid, data) in enumerate(top, 1):
         medal = medals.get(i, f"{i}.")
         lines.append(f"{medal} {data['name']} — {data['score']} балл.")
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    await message.answer("\n".join(lines))
 
-@router.message(Command("dolcestat"))
+@router.message(Command("dolcestat"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_dolcestat(message: Message):
     uid = str(message.from_user.id)
     scores = load_scores()
@@ -518,11 +505,24 @@ async def cmd_dolcestat(message: Message):
     rank = next(i for i, (u, _) in enumerate(sort, 1) if u == uid)
     data = scores[uid]
     await message.answer(
-        f"📊 *{data['name']}*\n"
+        f"📊 {data['name']}\n"
         f"🏅 Место: {rank}\n"
-        f"🎯 Баллы: {data['score']}",
-        parse_mode="Markdown"
+        f"🎯 Баллы: {data['score']}"
     )
+
+@router.message(Command("dolcenext"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_dolcenext(message: Message):
+    chat_id = message.chat.id
+    game = games.get(chat_id)
+    if not game or not game.get("active"):
+        await message.answer("❌ Нет активной игры.")
+        return
+    # Отменяем таймер, если он есть
+    if game.get("timer_task"):
+        game["timer_task"].cancel()
+        game["timer_task"] = None
+    await message.answer("⏩ Переход к следующему раунду.")
+    await advance_game(chat_id, message.bot)
 
 # ---------- Текст во время игры ----------
 @router.message(F.text)
@@ -562,7 +562,11 @@ async def handle_text(message: Message):
 
     if game.get("active") and game["state"] in ("playing_guess", "playing_intuition"):
         user_answer = text.lower()
-        if user_answer in game.get("current_aliases", []):
+        if not game.get("round_answered") and user_answer in game.get("current_aliases", []):
+            # Блокируем раунд
+            game["round_answered"] = True
+            game["current_aliases"] = []  # очищаем варианты, чтобы никто не повторил
+
             user = message.from_user
             uid = str(user.id)
             game["scores"][uid] = game["scores"].get(uid, 0) + 1
