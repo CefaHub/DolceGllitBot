@@ -22,16 +22,17 @@ from aiogram.types import (
 )
 
 # ---------- Настройки ----------
-TOKEN = "8700266151:AAElnV2fk7P-2sUdyErxcNeOezp0LlY6870"
+TOKEN = "8700266151:AAElnV2fk7P-2sUdyErxcNeOezp0LlY6870"  # твой токен
 PHOTOS_BASE_DIR = "photos"
 INTUITION_FILE = "groups/intuitioninfo.txt"
 SCORES_FILE = "scores.json"
 MAX_ROUNDS = 20
 TIMEOUT_SECONDS = 60
 TEMP_DIR = "temp"
+ALLOWED_LINK_CODE = "Za40nw_tr"   # уникальный код твоей ссылки
 
-# ---------- Админы (ID) ----------
-ADMINS = [5702167274, 5286390518]  # ← замените на реальные
+# ---------- Админы ----------
+ADMINS = [5702167274, 5286390518, 7657656143, 5611544020, 7801005536, 6433057739, 1578033784, 5539415319, 7846159818, 8500806054, 5383257678]
 
 # ---------- Синонимы для Угадайки ----------
 ALIASES: Dict[str, List[str]] = {
@@ -47,7 +48,8 @@ logger = logging.getLogger(__name__)
 def load_guess_photos():
     base = Path(PHOTOS_BASE_DIR)
     if not base.exists():
-        raise FileNotFoundError(f"Папка {PHOTOS_BASE_DIR} не найдена!")
+        logger.warning(f"Папка {PHOTOS_BASE_DIR} не найдена! Игра Угадайка будет недоступна.")
+        return []
     questions = []
     for person_dir in base.iterdir():
         if not person_dir.is_dir():
@@ -57,7 +59,7 @@ def load_guess_photos():
             if img.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
                 questions.append({"path": str(img), "folder": folder_name})
     if not questions:
-        raise FileNotFoundError("Нет фото в подпапках photos/")
+        logger.warning("Нет фото в подпапках photos/. Угадайка не будет запускаться.")
     return questions
 
 ALL_GUESS = load_guess_photos()
@@ -67,7 +69,7 @@ logger.info(f"Угадайка: загружено {len(ALL_GUESS)} вопрос
 def load_intuition():
     path = Path(INTUITION_FILE)
     if not path.exists():
-        logger.warning(f"Файл {INTUITION_FILE} не найден")
+        logger.warning(f"Файл {INTUITION_FILE} не найден. Интуиция будет недоступна.")
         return []
     lines = []
     with open(path, "r", encoding="utf-8") as f:
@@ -105,6 +107,9 @@ def save_scores(scores):
 # ---------- Игры ----------
 games: Dict[int, dict] = {}
 intuition_used: Dict[int, Set[int]] = {}
+
+# Множество одобренных админами пользователей (чтобы не банить при входе)
+approved: Dict[int, Set[int]] = {}
 
 def get_user_name(user: types.User) -> str:
     return f"@{user.username}" if user.username else user.full_name
@@ -327,32 +332,10 @@ async def confirm_add(callback: CallbackQuery, state: FSMContext):
     folder_name = data["folder_name"]
     temp_dir = Path(data["temp_dir"])
     target_dir = Path(PHOTOS_BASE_DIR) / folder_name
-    # Гарантируем существование папки
     target_dir.mkdir(parents=True, exist_ok=True)
     for f in temp_dir.iterdir():
         shutil.move(str(f), str(target_dir / f.name))
     shutil.rmtree(temp_dir)
-    aliases = data["aliases"]
-    ALIASES[folder_name] = aliases
-    global ALL_GUESS
-    ALL_GUESS = load_guess_photos()
-    await callback.message.answer(f"✅ Участник `{folder_name}` обновлён! Фото добавлены.")
-    await state.clear()
-
-@admin_router.callback_query(F.data == "confirm_add", AddStates.confirmation)
-async def confirm_add(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    folder_name = data["folder_name"]
-    temp_dir = Path(data["temp_dir"])
-    target_dir = Path(PHOTOS_BASE_DIR) / folder_name
-    # Убедимся, что целевая папка существует
-    target_dir.mkdir(parents=True, exist_ok=True)
-    # Перемещаем файлы
-    for f in temp_dir.iterdir():
-        shutil.move(str(f), str(target_dir / f.name))
-    shutil.rmtree(temp_dir)
-    # Обновляем ALIASES и список фото
     aliases = data["aliases"]
     ALIASES[folder_name] = aliases
     global ALL_GUESS
@@ -425,6 +408,9 @@ async def cmd_guessgame(message: Message):
     chat_id = message.chat.id
     if chat_id in games and games[chat_id].get("active"):
         await message.answer("🎮 Уже идёт другая игра! Остановите: /stopdolce")
+        return
+    if not ALL_GUESS:
+        await message.answer("❌ Игра Угадайка временно недоступна (нет фото).")
         return
     games[chat_id] = {
         "active": False,
@@ -517,12 +503,185 @@ async def cmd_dolcenext(message: Message):
     if not game or not game.get("active"):
         await message.answer("❌ Нет активной игры.")
         return
-    # Отменяем таймер, если он есть
     if game.get("timer_task"):
         game["timer_task"].cancel()
         game["timer_task"] = None
     await message.answer("⏩ Переход к следующему раунду.")
     await advance_game(chat_id, message.bot)
+
+# ---------- Команда разбана (reply) ----------
+@router.message(Command("unban"))
+async def unban_user(message: Message):
+    if message.from_user.id not in ADMINS:
+        return
+    if not message.reply_to_message:
+        await message.answer("❌ Ответьте на служебное сообщение о входе пользователя, которого нужно разбанить.")
+        return
+    user_id = None
+    if message.reply_to_message.new_chat_members:
+        user_id = message.reply_to_message.new_chat_members[0].id
+    elif message.reply_to_message.left_chat_member:
+        user_id = message.reply_to_message.left_chat_member.id
+    else:
+        user_id = message.reply_to_message.from_user.id
+    try:
+        await message.bot.unban_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            only_if_banned=True
+        )
+        await message.answer(f"✅ Пользователь разблокирован.")
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+
+# ---------- Модерация заявок (только ручное одобрение) ----------
+@router.chat_join_request()
+async def handle_join_request(request: types.ChatJoinRequest):
+    chat_id = request.chat.id
+    user = request.from_user
+    invite_link = request.invite_link.invite_link if request.invite_link else None
+
+    logger.info(f"Заявка от {user.full_name} (@{user.username}), ссылка: {invite_link}")
+
+    # Разрешённая ссылка – НЕ принимаем автоматически!
+    if invite_link and ALLOWED_LINK_CODE in invite_link:
+        # Отправляем админам запрос с кнопками «Разрешить» / «Отклонить»
+        admins = await request.bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if admin.user.is_bot:
+                continue
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Разрешить", callback_data=f"approve_join:{chat_id}:{user.id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline_join:{chat_id}:{user.id}")
+                ]
+            ])
+            try:
+                await request.bot.send_message(
+                    admin.user.id,
+                    f"👤 {user.mention_html()} хочет войти по разрешённой ссылке.\n"
+                    f"Принять или отклонить?",
+                    parse_mode="HTML",
+                    reply_markup=kb
+                )
+            except Exception:
+                pass
+        return
+
+    # Все остальные ссылки – мгновенный decline
+    await request.decline()
+
+# Колбэки для кнопок
+@router.callback_query(F.data.startswith("approve_join:"))
+async def approve_join(callback: CallbackQuery):
+    _, chat_id_str, user_id_str = callback.data.split(":")
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    try:
+        # Одобряем заявку
+        await callback.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+        # Запоминаем, чтобы не забанить в new_chat_members
+        approved.setdefault(chat_id, set()).add(user_id)
+        # Даём мут
+        await callback.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=types.ChatPermissions(can_send_messages=False)
+        )
+        # Отправляем админам кнопку "Разрешить" для снятия мута
+        admins = await callback.bot.get_chat_administrators(chat_id)
+        for admin in admins:
+            if admin.user.is_bot:
+                continue
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Разрешить", callback_data=f"unmute:{chat_id}:{user_id}")
+            ]])
+            try:
+                await callback.bot.send_message(
+                    admin.user.id,
+                    f"👤 Пользователь добавлен и заглушен. Нажмите кнопку, чтобы разрешить отправку сообщений.",
+                    reply_markup=kb
+                )
+            except Exception:
+                pass
+        await callback.answer("Заявка одобрена", show_alert=False)
+        await callback.message.edit_text("✅ Заявка одобрена, пользователь заглушен.")
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+@router.callback_query(F.data.startswith("decline_join:"))
+async def decline_join(callback: CallbackQuery):
+    _, chat_id_str, user_id_str = callback.data.split(":")
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    try:
+        await callback.bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+        await callback.answer("Заявка отклонена", show_alert=False)
+        await callback.message.edit_text("❌ Заявка отклонена.")
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+@router.callback_query(F.data.startswith("unmute:"))
+async def unmute_user(callback: CallbackQuery):
+    _, chat_id_str, user_id_str = callback.data.split(":")
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    try:
+        await callback.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=types.ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+        await callback.answer("Пользователь размучен", show_alert=False)
+        await callback.message.edit_text("✅ Пользователь получил доступ к чату.")
+    except Exception as e:
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+# Обработка новых участников (подстраховка)
+@router.message(F.new_chat_members)
+async def on_new_chat_members(message: Message):
+    chat_id = message.chat.id
+    adder = message.from_user
+
+    for new_member in message.new_chat_members:
+        logger.info(f"Новый участник: {new_member.full_name} (ID: {new_member.id}) в чате {chat_id}")
+
+        # Пропускаем одобренных админом через кнопку
+        if chat_id in approved and new_member.id in approved[chat_id]:
+            approved[chat_id].discard(new_member.id)
+            continue
+
+        # Пропускаем ботов
+        if new_member.is_bot:
+            continue
+
+        # Пропускаем, если добавил администратор вручную
+        chat_admins = await message.bot.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in chat_admins]
+        if adder.id in admin_ids:
+            continue
+
+        # Все остальные – бан
+        try:
+            await message.bot.ban_chat_member(chat_id=chat_id, user_id=new_member.id)
+            logger.info(f"Забанен пользователь {new_member.id}")
+            for admin in chat_admins:
+                if admin.user.is_bot:
+                    continue
+                try:
+                    await message.bot.send_message(
+                        admin.user.id,
+                        f"🚫 Пользователь {new_member.mention_html()} забанен (вошёл без разрешённой ссылки)."
+                    )
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Ошибка бана пользователя {new_member.id}: {e}")
 
 # ---------- Текст во время игры ----------
 @router.message(F.text)
@@ -563,9 +722,8 @@ async def handle_text(message: Message):
     if game.get("active") and game["state"] in ("playing_guess", "playing_intuition"):
         user_answer = text.lower()
         if not game.get("round_answered") and user_answer in game.get("current_aliases", []):
-            # Блокируем раунд
             game["round_answered"] = True
-            game["current_aliases"] = []  # очищаем варианты, чтобы никто не повторил
+            game["current_aliases"] = []
 
             user = message.from_user
             uid = str(user.id)
