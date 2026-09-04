@@ -1,0 +1,167 @@
+{
+  "элиа": {
+    "month": 1,
+    "day": 6,
+    "timezone": "не указан"
+  },
+  "сабина": {
+    "month": 1,
+    "day": 25,
+    "timezone": "не указан"
+  },
+  "минмин": {
+    "month": 2,
+    "day": 11,
+    "timezone": "не указан"
+  },
+  "маона": {
+    "month": 3,
+    "day": 4,
+    "timezone": "UTC+6"
+  },
+  "аюми": {
+    "month": 4,
+    "day": 10,
+    "timezone": "не указан"
+  },
+  "маккото": {
+    "month": 5,
+    "day": 9,
+    "timezone": "не указан"
+  },
+  "лэйша": {
+    "month": 6,
+    "day": 2,
+    "timezone": "не указан"
+  },
+  "риоресса": {
+    "month": 7,
+    "day": 21,
+    "timezone": "не указан"
+  },
+  "хаэ": {
+    "month": 7,
+    "day": 23,
+    "timezone": "не указан"
+  },
+  "инжи": {
+    "month": 8,
+    "day": 12,
+    "timezone": "UTC+3"
+  },
+  "элла": {
+    "month": 8,
+    "day": 18,
+    "timezone": "не указан"
+  },
+  "никилис": {
+    "month": 9,
+    "day": 2,
+    "timezone": "не указан"
+  },
+  "силинтэ": {
+    "month": 9,
+    "day": 5,
+    "timezone": "UTC+3"
+  },
+  "вонроха": {
+    "month": 9,
+    "day": 21,
+    "timezone": "UTC+3"
+  },
+  "лайтер": {
+    "month": 10,
+    "day": 2,
+    "timezone": "не указан"
+  },
+  "жвачка": {
+    "month": 10,
+    "day": 15,
+    "timezone": "не указан"
+  },
+  "виви": {
+    "month": 11,
+    "day": 6,
+    "timezone": "не указан"
+  },
+  "виенс": {
+    "month": 11,
+    "day": 9,
+    "timezone": "не указан"
+  },
+  "эни": {
+    "month": 11,
+    "day": 13,
+    "timezone": "не указан"
+  },
+  "лиля": {
+    "month": 12,
+    "day": 2,
+    "timezone": "UTC+3"
+  },
+  "юнми": {
+    "month": 12,
+    "day": 8,
+    "timezone": "не указан"
+  },
+  "свитти фокс": {
+    "month": 12,
+    "day": 18,
+    "timezone": "не указан"
+  },
+  "мими": {
+    "month": 12,
+    "day": 20,
+    "timezone": "UTC+5"
+  },
+  "айс": {
+    "month": 6,
+    "day": 15,
+    "timezone": "UTC+3"
+  },
+  "иера": {
+    "month": 2,
+    "day": 6,
+    "timezone": "не указан"
+  },
+  "юйлань": {
+    "month": 6,
+    "day": 2,
+    "timezone": "UTC+7"
+  },
+  "сора": {
+    "month": 6,
+    "day": 10,
+    "timezone": "UTC+12"
+  },
+  "элли": {
+    "month": 3,
+    "day": 18,
+    "timezone": "не указан"
+  },
+  "лика": {
+    "month": 8,
+    "day": 7,
+    "timezone": "UTC+6"
+  },
+  "юми": {
+    "month": 10,
+    "day": 29,
+    "timezone": "не указан"
+  },
+  "малина": {
+    "month": 8,
+    "day": 19,
+    "timezone": "не указан"
+  },
+  "даря": {
+    "month": 7,
+    "day": 21,
+    "timezone": "UTC+3"
+  },
+  "мэнъяо": {
+    "month": 4,
+    "day": 21,
+    "timezone": "UTC+3"
+  }
+}

@@ -74,7 +74,46 @@ async def check_birthdays(bot: Bot):
         # Ждём до следующего запуска в 00:01
         next_check = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
         await asyncio.sleep((next_check - now).total_seconds())
-        
+
+KNOWN_USERS_FILE = "known_users.json"
+
+def load_known_users():
+    if not os.path.exists(KNOWN_USERS_FILE):
+        return {}
+    with open(KNOWN_USERS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        result = {}
+        for chat_id_str, users_dict in data.items():
+            chat_id = int(chat_id_str)
+            result[chat_id] = {int(uid): name for uid, name in users_dict.items()}
+        return result
+
+def save_known_users(data):
+    serializable = {
+        str(chat_id): {str(uid): name for uid, name in users.items()}
+        for chat_id, users in data.items()
+    }
+    with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+# Загружаем при старте
+known_users = load_known_users()
+
+DABEST_EXCLUDED_FILE = "dabest_excluded.json"
+
+def load_excluded():
+    if not os.path.exists(DABEST_EXCLUDED_FILE):
+        return {}
+    with open(DABEST_EXCLUDED_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        return {int(chat_id): set(int(uid) for uid in uids) for chat_id, uids in data.items()}
+
+def save_excluded(data):
+    serializable = {str(chat_id): list(uids) for chat_id, uids in data.items()}
+    with open(DABEST_EXCLUDED_FILE, "w", encoding="utf-8") as f:
+        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+dabest_excluded = load_excluded()
 
 # ---------- Настройки ----------
 TOKEN = "8700266151:AAElnV2fk7P-2sUdyErxcNeOezp0LlY6870"
@@ -178,7 +217,8 @@ def save_scores(scores):
 # ---------- Игры ----------
 games: Dict[int, dict] = {}
 intuition_used: Dict[int, Set[int]] = {}
-approved: Dict[int, Set[int]] = {}                # кто уже одобрен и замучен
+approved: Dict[int, Set[int]] = {}    # кто уже одобрен и замучен
+known_users: Dict[int, Dict[int, str]] = {}   # chat_id -> {user_id: имя}
 pending_requests: Dict[int, Set[int]] = {}        # кто подал заявку по разрешённой ссылке
 
 def get_user_name(user: types.User) -> str:
@@ -528,9 +568,9 @@ async def cmd_birthdays(message: Message):
 @router.message(Command("dainfo"))
 async def cmd_dainfo(message: Message):
     await message.answer(
-        "👋 Привет! Я DolceBot\n"
-        "🎯 Угадайка: угадывайте людей по фото.\n"
-        "🎭 Интуиция: угадывайте человека по описанию.\n\n"
+        "👋 67покойо йа DolceBot\n"
+        "🎯 Угадайка: угадывойть людэй па фотаКАРточком.\n"
+        "🎭 Интуиция: угадывойть чэлавека па описянийу.\n\n"
         "📌 Команды:\n"
         "/guessgame — начать Угадайку\n"
         "/intuition — начать Интуицию\n"
@@ -540,6 +580,8 @@ async def cmd_dainfo(message: Message):
         "/dolcenext — следующее фото (если бот завис)\n"
         "/dafolders — показать все папки с фото\n"
         "/dolcebirthdays — дни рождения участников\n"
+        "/dolcebest — лучший в чате\n"
+        "/dolcebest off/on — выключить/включить команду \n"
         "/dainfo — это сообщение\n\n"
         "⚡ Во время игры пишите ответ прямо в чат.\n\n"
         "🛠 Для админов в ЛС:\n"
@@ -653,6 +695,46 @@ async def cmd_dolcenext(message: Message):
     await message.answer("⏩ Переход к следующему раунду.")
     await advance_game(chat_id, message.bot)
 
+@router.message(Command("dolcebest"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_dolcebest(message: Message):
+    args = message.text.split()
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    # Команда off – исключить себя
+    if len(args) >= 2 and args[1].lower() == "off":
+        dabest_excluded.setdefault(chat_id, set()).add(user_id)
+        save_excluded(dabest_excluded)
+        await message.answer("✅ Команда отключена для вас ХЭХ.")
+        return
+
+    # Команда on – вернуть себя
+    if len(args) >= 2 and args[1].lower() == "on":
+        if chat_id in dabest_excluded and user_id in dabest_excluded[chat_id]:
+            dabest_excluded[chat_id].discard(user_id)
+            save_excluded(dabest_excluded)
+            await message.answer("✅ Команда включена для вас НЕ ХЭХ.")
+        else:
+            await message.answer("Уже включено пупсик)")
+        return
+
+    # Основной розыгрыш (без аргументов или с неизвестным аргументом)
+    users = known_users.get(chat_id, {})
+    excluded = dabest_excluded.get(chat_id, set())
+    allowed = {uid: name for uid, name in users.items() if uid not in excluded}
+    if not allowed:
+        await message.answer("ФАХ я никово нинаю 😔")
+        return
+    uid = random.choice(list(allowed.keys()))
+    name = allowed[uid]
+    mention = f'<a href="tg://user?id={uid}">{name}</a>'
+    await message.answer(
+        f"Самый крутой участник это {mention}!!!!!!!!!!!\n"
+        f"Отключить себя: /dolcebest off\n"
+        f"Включить себя: /dolcebest on",
+        parse_mode="HTML"
+    )
+    
 # ---------- Команда разбана (reply) ----------
 @router.message(Command("unban"))
 async def unban_user(message: Message):
@@ -848,11 +930,22 @@ async def on_new_chat_members(message: Message):
         except Exception as e:
             logger.error(f"Ошибка бана {new_member.id}: {e}")
 
+@router.message(F.left_chat_member)
+async def on_left_chat_member(message: Message):
+    chat_id = message.chat.id
+    user = message.left_chat_member
+    if chat_id in known_users and user.id in known_users[chat_id]:
+        del known_users[chat_id][user.id]
+        save_known_users(known_users)
+            
 # ---------- Текст во время игры ----------
 @router.message(F.text)
 async def handle_text(message: Message):
     chat_id = message.chat.id
     game = games.get(chat_id)
+        # Сохраняем пользователя в known_users (для команды /dolcebest)
+    known_users.setdefault(chat_id, {})[message.from_user.id] = get_user_name(message.from_user)
+    save_known_users(known_users)   # <-- ДОБАВЬ ЭТУ СТРОКУ
     if not game:
         return
 
