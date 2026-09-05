@@ -123,7 +123,7 @@ SCORES_FILE = "scores.json"
 MAX_ROUNDS = 20
 TIMEOUT_SECONDS = 60
 TEMP_DIR = "temp"
-ALLOWED_LINK_CODE = "Za40nw"               # твой код ссылки
+ALLOWED_LINK_CODE = "ILO47yYNbjw1MDIy"               # твой код ссылки
 ACTIVATED_FILE = "activated_admins.json"
 
 ADMINS = [5702167274, 5286390518, 7657656143, 5611544020, 7801005536, 6433057739, 1578033784, 5539415319, 7846159818, 8500806054, 5383257678]
@@ -583,6 +583,7 @@ async def cmd_dainfo(message: Message):
         "/dolcebest — лучший в чате\n"
         "/dolcebest off/on — выключить/включить команду \n"
         "/dainfo — это сообщение\n\n"
+        "/dolcelink — получить ссылку для входа\n"
         "⚡ Во время игры пишите ответ прямо в чат.\n\n"
         "🛠 Для админов в ЛС:\n"
         "/da, /da_cancel, /da_add_birthday, /da_remove_birthday\n"
@@ -760,6 +761,10 @@ async def unban_user(message: Message):
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+@router.message(Command("dolcelink"))
+async def cmd_dolcelink(message: Message):
+    await message.answer("🔗 Актуальная ссылка для входа:\nhttps://t.me/+ILO47yYNbjw1MDIy")
+        
 @router.message(Command("unmute"))
 async def unmute_user_by_reply(message: Message):
     if message.from_user.id not in ADMINS:
