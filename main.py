@@ -1,4 +1,6 @@
 import asyncio
+import html
+import unicodedata
 import json
 import logging
 import os
@@ -8,6 +10,42 @@ import shutil
 from pathlib import Path
 from typing import Dict, Set, List
 from datetime import datetime, timedelta
+
+# Persist state outside the source tree in Docker. Locally, keep legacy files compatible.
+DATA_DIR = Path(os.environ.get("DATA_DIR", "."))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def state_file(name: str) -> Path:
+    return DATA_DIR / name
+
+def read_json(name: str, fallback):
+    path = state_file(name)
+    if not path.is_file():
+        return fallback
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logging.getLogger(__name__).error("Failed to read %s: %s", path, exc)
+        return fallback
+
+def write_json(name: str, value) -> None:
+    """Write atomically to avoid truncation during a restart or crash."""
+    path = state_file(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+def normalize_answer(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().replace("ё", "е").split())
+
+def normalized_aliases(values):
+    return list(dict.fromkeys(normalize_answer(x) for x in values if isinstance(x, str) and normalize_answer(x)))
+
 
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command, StateFilter
@@ -27,14 +65,10 @@ BIRTHDAYS_FILE = "birthdays.json"
 BIRTHDAY_CHAT_ID = -1002957700582   # ← ПОМЕНЯЙ НА РЕАЛЬНЫЙ ID ГРУППЫ
 
 def load_birthdays():
-    if not os.path.exists(BIRTHDAYS_FILE):
-        return {}
-    with open(BIRTHDAYS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return read_json(BIRTHDAYS_FILE, {})
 
 def save_birthdays(data):
-    with open(BIRTHDAYS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json(BIRTHDAYS_FILE, data)
 
 birthdays = load_birthdays()
 
@@ -54,8 +88,8 @@ async def check_birthdays(bot: Bot):
                 try:
                     await bot.send_message(
                         BIRTHDAY_CHAT_ID,
-                        f"🎂 Завтра день рождения у *{name}*!\nЧасовой пояс: {tz}",
-                        parse_mode="Markdown"
+                        f"🎂 Завтра день рождения у <b>{html.escape(name)}</b>!\nЧасовой пояс: {html.escape(str(tz))}",
+                        parse_mode="HTML"
                     )
                 except Exception as e:
                     logger.error(f"Ошибка предупреждения ДР: {e}")
@@ -65,8 +99,8 @@ async def check_birthdays(bot: Bot):
                 try:
                     await bot.send_message(
                         BIRTHDAY_CHAT_ID,
-                        f"🎉 Сегодня день рождения у *{name}*! Поздравляем! 🎂\nЧасовой пояс: {tz}",
-                        parse_mode="Markdown"
+                        f"🎉 Сегодня день рождения у <b>{html.escape(name)}</b>! Поздравляем! 🎂\nЧасовой пояс: {html.escape(str(tz))}",
+                        parse_mode="HTML"
                     )
                 except Exception as e:
                     logger.error(f"Ошибка поздравления с ДР: {e}")
@@ -78,23 +112,18 @@ async def check_birthdays(bot: Bot):
 KNOWN_USERS_FILE = "known_users.json"
 
 def load_known_users():
-    if not os.path.exists(KNOWN_USERS_FILE):
-        return {}
-    with open(KNOWN_USERS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        result = {}
-        for chat_id_str, users_dict in data.items():
-            chat_id = int(chat_id_str)
-            result[chat_id] = {int(uid): name for uid, name in users_dict.items()}
-        return result
+    data = read_json(KNOWN_USERS_FILE, {})
+    return {
+        int(chat_id): {int(uid): str(name) for uid, name in users.items()}
+        for chat_id, users in data.items() if isinstance(users, dict)
+    }
 
 def save_known_users(data):
     serializable = {
         str(chat_id): {str(uid): name for uid, name in users.items()}
         for chat_id, users in data.items()
     }
-    with open(KNOWN_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
+    write_json(KNOWN_USERS_FILE, serializable)
 
 # Загружаем при старте
 known_users = load_known_users()
@@ -102,16 +131,11 @@ known_users = load_known_users()
 DABEST_EXCLUDED_FILE = "dabest_excluded.json"
 
 def load_excluded():
-    if not os.path.exists(DABEST_EXCLUDED_FILE):
-        return {}
-    with open(DABEST_EXCLUDED_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        return {int(chat_id): set(int(uid) for uid in uids) for chat_id, uids in data.items()}
+    data = read_json(DABEST_EXCLUDED_FILE, {})
+    return {int(chat_id): {int(uid) for uid in uids} for chat_id, uids in data.items()}
 
 def save_excluded(data):
-    serializable = {str(chat_id): list(uids) for chat_id, uids in data.items()}
-    with open(DABEST_EXCLUDED_FILE, "w", encoding="utf-8") as f:
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
+    write_json(DABEST_EXCLUDED_FILE, {str(chat): sorted(users) for chat, users in data.items()})
 
 dabest_excluded = load_excluded()
 
@@ -125,6 +149,8 @@ TIMEOUT_SECONDS = 60
 TEMP_DIR = "temp"
 ALLOWED_LINK_CODE = "ILO47yYNbjw1MDIy"               # твой код ссылки
 ACTIVATED_FILE = "activated_admins.json"
+ALIASES_FILE = "aliases.json"
+MODERATION_FILE = "moderation_state.json"
 
 ADMINS = [5702167274, 5286390518, 7657656143, 5611544020, 7801005536, 6433057739, 1578033784, 5539415319, 7846159818, 8500806054, 5383257678]
 
@@ -141,16 +167,10 @@ activated: Set[int] = set()
 
 def load_activated():
     global activated
-    if os.path.exists(ACTIVATED_FILE):
-        with open(ACTIVATED_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            activated = {int(x) for x in data}
-    else:
-        activated = set()
+    activated = {int(x) for x in read_json(ACTIVATED_FILE, [])}
 
 def save_activated():
-    with open(ACTIVATED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(activated), f, ensure_ascii=False)
+    write_json(ACTIVATED_FILE, sorted(activated))
 
 load_activated()
 
@@ -191,7 +211,7 @@ def load_intuition():
             if not match:
                 continue
             raw = match.group(1)
-            aliases = [a.strip().lower() for a in raw.split("/") if a.strip()]
+            aliases = normalized_aliases(raw.split("/"))
             if not aliases:
                 continue
             description = re.sub(r'\{.*?\}', '', line).strip()
@@ -203,23 +223,60 @@ def load_intuition():
 INTUITION_LINES = load_intuition()
 logger.info(f"Интуиция: загружено {len(INTUITION_LINES)} описаний")
 
+def build_guess_aliases():
+    """Reuse every Russian/Latin spelling listed in intuitioninfo.txt."""
+    mapping = {folder: normalized_aliases([folder, *variants]) for folder, variants in ALIASES.items()}
+    folder_names = {q["folder"] for q in ALL_GUESS}
+    for line in INTUITION_LINES:
+        variants = line["aliases"]
+        for folder in folder_names:
+            if normalize_answer(folder) in variants:
+                mapping[folder] = normalized_aliases([*mapping.get(folder, [folder]), *variants])
+    # Extra aliases entered in the admin panel survive a restart.
+    overrides = read_json(ALIASES_FILE, {})
+    if isinstance(overrides, dict):
+        for folder, variants in overrides.items():
+            if isinstance(folder, str) and re.fullmatch(r"[a-z0-9_]+", folder) and isinstance(variants, list):
+                mapping[folder] = normalized_aliases([folder, *mapping.get(folder, []), *variants])
+    return mapping
+
+ALIASES = build_guess_aliases()
+
+def save_aliases():
+    write_json(ALIASES_FILE, ALIASES)
+
+
 # ---------- Рейтинг ----------
 def load_scores():
-    if not os.path.exists(SCORES_FILE):
-        return {}
-    with open(SCORES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return read_json(SCORES_FILE, {})
 
 def save_scores(scores):
-    with open(SCORES_FILE, "w", encoding="utf-8") as f:
-        json.dump(scores, f, ensure_ascii=False, indent=2)
+    write_json(SCORES_FILE, scores)
 
 # ---------- Игры ----------
 games: Dict[int, dict] = {}
 intuition_used: Dict[int, Set[int]] = {}
 approved: Dict[int, Set[int]] = {}    # кто уже одобрен и замучен
-known_users: Dict[int, Dict[int, str]] = {}   # chat_id -> {user_id: имя}
-pending_requests: Dict[int, Set[int]] = {}        # кто подал заявку по разрешённой ссылке
+# known_users was already loaded above: do not reset it here.
+pending_requests: Dict[int, Set[int]] = {}  # validated pending join requests
+awaiting_unmute: Dict[int, Set[int]] = {}   # approved members pending explicit unmute
+
+def load_moderation_state():
+    state = read_json(MODERATION_FILE, {})
+    for key, destination in (("pending", pending_requests), ("approved", approved), ("muted", awaiting_unmute)):
+        data = state.get(key, {}) if isinstance(state, dict) else {}
+        if isinstance(data, dict):
+            destination.update({int(cid): {int(uid) for uid in uids} for cid, uids in data.items()})
+
+def save_moderation_state():
+    write_json(MODERATION_FILE, {
+        "pending": {str(k): sorted(v) for k, v in pending_requests.items() if v},
+        "approved": {str(k): sorted(v) for k, v in approved.items() if v},
+        "muted": {str(k): sorted(v) for k, v in awaiting_unmute.items() if v},
+    })
+
+load_moderation_state()
+
 
 def get_user_name(user: types.User) -> str:
     return f"@{user.username}" if user.username else user.full_name
@@ -227,11 +284,11 @@ def get_user_name(user: types.User) -> str:
 async def send_photo_msg(bot: Bot, chat_id: int, path: str, caption="") -> Message:
     return await bot.send_photo(chat_id, FSInputFile(path), caption=caption)
 
-async def timeout_task(chat_id: int, bot: Bot):
+async def timeout_task(chat_id: int, bot: Bot, game: dict, round_no: int):
     await asyncio.sleep(TIMEOUT_SECONDS)
-    game = games.get(chat_id)
-    if not game or not game.get("active"):
+    if games.get(chat_id) is not game or not game.get("active") or game["current_round"] != round_no or game.get("round_answered"):
         return
+    game["round_answered"] = True
     game["timer_task"] = None
     if game["game_type"] == "intuition":
         correct = "/".join(game["current_aliases"])
@@ -264,23 +321,23 @@ async def start_guess_round(chat_id: int, bot: Bot):
     q = pick_unused_guess(game["used_items"])
     folder = q["folder"]
     aliases = ALIASES.get(folder, [folder])
-    game["current_aliases"] = [a.lower() for a in aliases]
+    game["current_aliases"] = normalized_aliases(aliases)
     game["used_items"].add(q["path"])
     msg = await send_photo_msg(bot, chat_id, q["path"], caption="Кто это? 🤔")
     game["photo_message_id"] = msg.message_id
-    task = asyncio.create_task(timeout_task(chat_id, bot))
-    game["timer_task"] = task
     game["round_answered"] = False
+    task = asyncio.create_task(timeout_task(chat_id, bot, game, game["current_round"]))
+    game["timer_task"] = task
 
 async def start_intuition_round(chat_id: int, bot: Bot):
     game = games[chat_id]
     game["current_round"] += 1
     idx, desc, aliases = pick_unused_intuition(chat_id)
     game["current_aliases"] = aliases
-    await bot.send_message(chat_id, f"🎭 *Интуиция* 🎭\n\n{desc}", parse_mode="Markdown")
-    task = asyncio.create_task(timeout_task(chat_id, bot))
-    game["timer_task"] = task
+    await bot.send_message(chat_id, f"🎭 <b>Интуиция</b> 🎭\n\n{html.escape(desc)}", parse_mode="HTML")
     game["round_answered"] = False
+    task = asyncio.create_task(timeout_task(chat_id, bot, game, game["current_round"]))
+    game["timer_task"] = task
 
 async def advance_game(chat_id: int, bot: Bot):
     game = games.get(chat_id)
@@ -290,6 +347,8 @@ async def advance_game(chat_id: int, bot: Bot):
         await end_game(chat_id, bot, stopped=False)
     else:
         await asyncio.sleep(2)
+        if games.get(chat_id) is not game or not game.get("active"):
+            return
         if game["game_type"] == "guess":
             await start_guess_round(chat_id, bot)
         else:
@@ -355,6 +414,28 @@ admin_router = Router()
 def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
 
+async def require_admin_callback(callback: CallbackQuery) -> bool:
+    if (not callback.from_user or not is_admin(callback.from_user.id)
+            or not callback.message or callback.message.chat.type != "private"
+            or callback.message.chat.id != callback.from_user.id):
+        await callback.answer("❌ Только для администраторов в личных сообщениях.", show_alert=True)
+        return False
+    return True
+
+def decode_moderation_callback(data: str, prefix: str):
+    match = re.fullmatch(rf"{re.escape(prefix)}:(-?\d+):(\d+)", data or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+def full_chat_permissions() -> types.ChatPermissions:
+    return types.ChatPermissions(
+        can_send_messages=True, can_send_audios=True, can_send_documents=True,
+        can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+        can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+        can_add_web_page_previews=True,
+    )
+
 # ---------- Команда /start для активации админов ----------
 @router.message(Command("start"), F.chat.type == "private")
 async def cmd_start(message: Message):
@@ -376,17 +457,22 @@ async def cmd_da(message: Message, state: FSMContext):
         await message.answer("Использование: /da <имя_папки>\nПример: /da eunchae")
         return
     folder_name = args[1].strip().lower()
-    if not re.match(r'^[a-z0-9_]+$', folder_name):
+    if not re.fullmatch(r'[a-z0-9_]+', folder_name):
         await message.answer("Имя папки должно содержать только латиницу, цифры и подчёркивания.")
         return
 
+    old = await state.get_data()
+    previous_temp = old.get("temp_dir")
+    if previous_temp:
+        shutil.rmtree(previous_temp, ignore_errors=True)
+    await state.clear()
     target_dir = Path(PHOTOS_BASE_DIR) / folder_name
     await state.update_data(folder_name=folder_name)
 
     if target_dir.exists():
         existing_aliases = ALIASES.get(folder_name, [folder_name])
         await state.update_data(aliases=existing_aliases)
-        temp_dir = Path(TEMP_DIR) / folder_name
+        temp_dir = Path(TEMP_DIR) / str(message.from_user.id) / folder_name
         temp_dir.mkdir(parents=True, exist_ok=True)
         await state.update_data(temp_dir=str(temp_dir))
         await state.set_state(AddStates.waiting_for_photos)
@@ -406,20 +492,41 @@ async def cmd_da(message: Message, state: FSMContext):
         "Введите варианты имени через `/` (например: `ынче/ынчэ/eunchae`):"
     )
 
+@admin_router.message(Command("da_aliases"), F.chat.type == "private")
+async def cmd_da_aliases(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещён.")
+        return
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) != 3 or not re.fullmatch(r"[a-z0-9_]+", args[1].lower()):
+        await message.answer("Использование: /da_aliases eunchae ынче/ынчэ/eunchae")
+        return
+    folder = args[1].lower()
+    if not (Path(PHOTOS_BASE_DIR) / folder).is_dir():
+        await message.answer("❌ Папка с таким именем не найдена.")
+        return
+    incoming = normalized_aliases(args[2].split("/"))
+    if not incoming or len(incoming) > 40 or any(len(x) > 80 for x in incoming):
+        await message.answer("❌ Укажите от 1 до 40 имён длиной до 80 символов.")
+        return
+    ALIASES[folder] = normalized_aliases([folder, *ALIASES.get(folder, []), *incoming])
+    save_aliases()
+    await message.answer(f"✅ Варианты для {folder}: {', '.join(ALIASES[folder])}")
+
 @admin_router.message(AddStates.waiting_for_aliases, F.text, F.chat.type == "private")
 async def process_aliases(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await message.answer("❌ Доступ запрещён.")
         return
     text = message.text.strip()
-    aliases = [a.strip().lower() for a in text.split("/") if a.strip()]
-    if not aliases:
-        await message.answer("Вы не указали ни одного варианта. Повторите:")
+    aliases = normalized_aliases(text.split("/"))
+    if not aliases or len(aliases) > 40 or any(len(a) > 80 for a in aliases):
+        await message.answer("Укажите от 1 до 40 имён длиной до 80 символов.")
         return
     await state.update_data(aliases=aliases)
     data = await state.get_data()
     folder_name = data["folder_name"]
-    temp_dir = Path(TEMP_DIR) / folder_name
+    temp_dir = Path(TEMP_DIR) / str(message.from_user.id) / folder_name
     temp_dir.mkdir(parents=True, exist_ok=True)
     await state.update_data(temp_dir=str(temp_dir))
     await state.set_state(AddStates.waiting_for_photos)
@@ -445,19 +552,45 @@ async def process_photo(message: Message, state: FSMContext):
     await message.bot.download_file(file.file_path, destination=img_path)
     await message.answer("📸 Фото сохранено. Можете отправить ещё или нажать «Готово».")
 
+@admin_router.callback_query(F.data == "photos_done", AddStates.waiting_for_photos)
+async def photos_done(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin_callback(callback):
+        return
+    data = await state.get_data()
+    folder = data.get("folder_name")
+    temp_dir_name = data.get("temp_dir")
+    if not folder or not temp_dir_name:
+        await callback.answer("Сессия устарела, начните с /da", show_alert=True)
+        return
+    temp_dir = Path(temp_dir_name)
+    images = list(temp_dir.glob("*.jpg")) if temp_dir.is_dir() else []
+    if not images:
+        await callback.answer("Сначала отправьте хотя бы одну фотографию", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Сохранить", callback_data="confirm_add"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")
+    ]])
+    await state.set_state(AddStates.confirmation)
+    await callback.answer()
+    await callback.message.answer(f"Добавить {len(images)} фото в {folder}?", reply_markup=kb)
+
 @admin_router.callback_query(F.data == "confirm_add", AddStates.confirmation)
 async def confirm_add(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin_callback(callback):
+        return
     await callback.answer()
     data = await state.get_data()
     folder_name = data["folder_name"]
     temp_dir = Path(data["temp_dir"])
     target_dir = Path(PHOTOS_BASE_DIR) / folder_name
     target_dir.mkdir(parents=True, exist_ok=True)
-    for f in temp_dir.iterdir():
+    for f in temp_dir.glob("*.jpg"):
         shutil.move(str(f), str(target_dir / f.name))
-    shutil.rmtree(temp_dir)
+    shutil.rmtree(temp_dir, ignore_errors=True)
     aliases = data["aliases"]
-    ALIASES[folder_name] = aliases
+    ALIASES[folder_name] = normalized_aliases([folder_name, *ALIASES.get(folder_name, []), *aliases])
+    save_aliases()
     global ALL_GUESS
     ALL_GUESS = load_guess_photos()
     await callback.message.answer(f"✅ Участник `{folder_name}` обновлён! Фото добавлены.")
@@ -465,11 +598,13 @@ async def confirm_add(callback: CallbackQuery, state: FSMContext):
 
 @admin_router.callback_query(F.data == "cancel_add", AddStates.confirmation)
 async def cancel_add(callback: CallbackQuery, state: FSMContext):
+    if not await require_admin_callback(callback):
+        return
     await callback.answer()
     data = await state.get_data()
-    temp_dir = Path(data["temp_dir"])
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
+    temp_path = data.get("temp_dir")
+    if temp_path and Path(temp_path).exists():
+        shutil.rmtree(temp_path)
     await callback.message.answer("❌ Добавление отменено.")
     await state.clear()
 
@@ -506,7 +641,9 @@ async def cmd_add_birthday(message: Message):
         await message.answer("Месяц и день должны быть числами.")
         return
 
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    try:
+        datetime(2024, month, day)  # Leap year: allow February 29.
+    except ValueError:
         await message.answer("Неверная дата.")
         return
 
@@ -555,14 +692,14 @@ async def cmd_birthdays(message: Message):
         return
 
     sorted_bdays = sorted(birthdays.items(), key=lambda x: (x[1]["month"], x[1]["day"]))
-    lines = ["🎂 *Дни рождения:*"]
+    lines = ["🎂 <b>Дни рождения:</b>"]
     for name, data in sorted_bdays:
         month = data["month"]
         day = data["day"]
         tz = data.get("timezone", "не указан")
-        lines.append(f"• *{name}*: {day:02d}.{month:02d} (пояс: {tz})")
+        lines.append(f"• <b>{html.escape(name)}</b>: {day:02d}.{month:02d} (пояс: {html.escape(str(tz))})")
 
-    await message.answer("\n".join(lines), parse_mode="Markdown")
+    await message.answer("\n".join(lines), parse_mode="HTML")
     
 # ---------- Игровые команды ----------
 @router.message(Command("dainfo"))
@@ -586,7 +723,7 @@ async def cmd_dainfo(message: Message):
         "/dolcelink — получить ссылку для входа\n"
         "⚡ Во время игры пишите ответ прямо в чат.\n\n"
         "🛠 Для админов в ЛС:\n"
-        "/da, /da_cancel, /da_add_birthday, /da_remove_birthday\n"
+        "/da, /da_aliases, /da_cancel, /da_add_birthday, /da_remove_birthday\n"
         "Имя папки при добавлении должно совпадать с английской версией имени айдола."
     )
 
@@ -728,7 +865,7 @@ async def cmd_dolcebest(message: Message):
         return
     uid = random.choice(list(allowed.keys()))
     name = allowed[uid]
-    mention = f'<a href="tg://user?id={uid}">{name}</a>'
+    mention = f'<a href="tg://user?id={int(uid)}">{html.escape(str(name))}</a>'
     await message.answer(
         f"Самый крутой участник это {mention}!!!!!!!!!!!\n"
         f"Отключить себя: /dolcebest off\n"
@@ -783,12 +920,7 @@ async def unmute_user_by_reply(message: Message):
         await message.bot.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user_id,
-            permissions=types.ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True
-            )
+            permissions=full_chat_permissions()
         )
         await message.answer(f"✅ Пользователь размучен.")
     except Exception as e:
@@ -801,10 +933,11 @@ async def handle_join_request(request: types.ChatJoinRequest):
     user = request.from_user
     invite_link = request.invite_link.invite_link if request.invite_link else None
 
-    print("JOIN REQUEST RECEIVED", invite_link)
+    logger.info("JOIN REQUEST RECEIVED chat=%s user=%s", chat_id, user.id)
     if invite_link and ALLOWED_LINK_CODE in invite_link:
         # Запоминаем, что пользователь пришёл по рабочей ссылке
         pending_requests.setdefault(chat_id, set()).add(user.id)
+        save_moderation_state()
 
         for admin_id in ADMINS:
             if admin_id not in activated:
@@ -830,75 +963,98 @@ async def handle_join_request(request: types.ChatJoinRequest):
 
 @router.callback_query(F.data.startswith("approve_join:"))
 async def approve_join(callback: CallbackQuery):
-    _, chat_id_str, user_id_str = callback.data.split(":")
-    chat_id = int(chat_id_str)
-    user_id = int(user_id_str)
+    if not await require_admin_callback(callback):
+        return
+    parsed = decode_moderation_callback(callback.data, "approve_join")
+    if parsed is None:
+        await callback.answer("Неверная заявка", show_alert=True)
+        return
+    chat_id, user_id = parsed
+    if user_id not in pending_requests.get(chat_id, set()):
+        await callback.answer("Заявка уже обработана или устарела", show_alert=True)
+        return
     try:
         await callback.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
-        approved.setdefault(chat_id, set()).add(user_id)
+    except Exception as exc:
+        logger.exception("Failed to approve join request")
+        await callback.answer(f"Не удалось одобрить: {str(exc)[:120]}", show_alert=True)
+        return
+    pending_requests[chat_id].discard(user_id)
+    approved.setdefault(chat_id, set()).add(user_id)
+    save_moderation_state()
+    try:
         await callback.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=types.ChatPermissions(can_send_messages=False)
+            chat_id=chat_id, user_id=user_id,
+            permissions=types.ChatPermissions(can_send_messages=False),
         )
-
-        # Убираем из pending, т.к. мы уже обработали
-        if chat_id in pending_requests:
-            pending_requests[chat_id].discard(user_id)
-
-        # Шлём кнопку размута тому, кто одобрил
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Разрешить", callback_data=f"unmute:{chat_id}:{user_id}")
-        ]])
-        try:
-            await callback.bot.send_message(
-                callback.from_user.id,
-                "👤 Пользователь добавлен и заглушен. Нажмите кнопку, чтобы разрешить отправку сообщений.",
-                reply_markup=kb
-            )
-        except Exception:
-            pass
-
-        await callback.answer("Заявка одобрена", show_alert=False)
-        await callback.message.edit_text("✅ Заявка одобрена, пользователь заглушен.")
-    except Exception as e:
-        await callback.answer(f"Ошибка: {e}", show_alert=True)
+    except Exception:
+        logger.exception("User approved but failed to mute: chat=%s user=%s", chat_id, user_id)
+        await callback.answer("Заявка одобрена, но не удалось заглушить!", show_alert=True)
+        await callback.message.edit_text("⚠️ Пользователь одобрен, но автоматическое ограничение не сработало.")
+        return
+    awaiting_unmute.setdefault(chat_id, set()).add(user_id)
+    save_moderation_state()
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Разрешить", callback_data=f"unmute:{chat_id}:{user_id}")
+    ]])
+    try:
+        await callback.bot.send_message(
+            callback.from_user.id,
+            "👤 Пользователь добавлен и заглушен. Нажмите кнопку, чтобы разрешить отправку сообщений.",
+            reply_markup=kb,
+        )
+    except Exception:
+        logger.exception("Failed to notify admin about unmute")
+    await callback.answer("Заявка одобрена")
+    await callback.message.edit_text("✅ Заявка одобрена, пользователь заглушен.")
 
 @router.callback_query(F.data.startswith("decline_join:"))
 async def decline_join(callback: CallbackQuery):
-    _, chat_id_str, user_id_str = callback.data.split(":")
-    chat_id = int(chat_id_str)
-    user_id = int(user_id_str)
+    if not await require_admin_callback(callback):
+        return
+    parsed = decode_moderation_callback(callback.data, "decline_join")
+    if parsed is None:
+        await callback.answer("Неверная заявка", show_alert=True)
+        return
+    chat_id, user_id = parsed
+    if user_id not in pending_requests.get(chat_id, set()):
+        await callback.answer("Заявка уже обработана или устарела", show_alert=True)
+        return
     try:
         await callback.bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
-        # Удаляем из pending, если был
-        if chat_id in pending_requests:
-            pending_requests[chat_id].discard(user_id)
-        await callback.answer("Заявка отклонена", show_alert=False)
-        await callback.message.edit_text("❌ Заявка отклонена.")
-    except Exception as e:
-        await callback.answer(f"Ошибка: {e}", show_alert=True)
+    except Exception as exc:
+        logger.exception("Failed to decline join request")
+        await callback.answer(f"Не удалось отклонить: {str(exc)[:120]}", show_alert=True)
+        return
+    pending_requests[chat_id].discard(user_id)
+    save_moderation_state()
+    await callback.answer("Заявка отклонена")
+    await callback.message.edit_text("❌ Заявка отклонена.")
 
 @router.callback_query(F.data.startswith("unmute:"))
 async def unmute_user(callback: CallbackQuery):
-    _, chat_id_str, user_id_str = callback.data.split(":")
-    chat_id = int(chat_id_str)
-    user_id = int(user_id_str)
+    if not await require_admin_callback(callback):
+        return
+    parsed = decode_moderation_callback(callback.data, "unmute")
+    if parsed is None:
+        await callback.answer("Неверная кнопка", show_alert=True)
+        return
+    chat_id, user_id = parsed
+    if user_id not in awaiting_unmute.get(chat_id, set()):
+        await callback.answer("Пользователь уже размучен или кнопка устарела", show_alert=True)
+        return
     try:
         await callback.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=types.ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True
-            )
+            chat_id=chat_id, user_id=user_id, permissions=full_chat_permissions(),
         )
-        await callback.answer("Пользователь размучен", show_alert=False)
-        await callback.message.edit_text("✅ Пользователь получил доступ к чату.")
-    except Exception as e:
-        await callback.answer(f"Ошибка: {e}", show_alert=True)
+    except Exception as exc:
+        logger.exception("Failed to unmute user")
+        await callback.answer(f"Ошибка: {str(exc)[:120]}", show_alert=True)
+        return
+    awaiting_unmute[chat_id].discard(user_id)
+    save_moderation_state()
+    await callback.answer("Пользователь размучен")
+    await callback.message.edit_text("✅ Пользователь получил доступ к чату.")
 
 # Обработка новых участников
 @router.message(F.new_chat_members)
@@ -912,12 +1068,14 @@ async def on_new_chat_members(message: Message):
         # Проверяем, есть ли он в pending_requests (пришёл по разрешённой ссылке)
         if chat_id in pending_requests and new_member.id in pending_requests[chat_id]:
             pending_requests[chat_id].discard(new_member.id)
+            save_moderation_state()
             # Не баним, т.к. это наш пользователь
             continue
 
         # Уже одобренные через кнопку бота
         if chat_id in approved and new_member.id in approved[chat_id]:
             approved[chat_id].discard(new_member.id)
+            save_moderation_state()
             continue
 
         # Боты и ручное добавление админом
@@ -925,7 +1083,7 @@ async def on_new_chat_members(message: Message):
             continue
         chat_admins = await message.bot.get_chat_administrators(chat_id)
         admin_ids = [a.user.id for a in chat_admins]
-        if adder.id in admin_ids:
+        if adder is not None and adder.id in admin_ids:
             continue
 
         # Остальные – бан
@@ -948,9 +1106,13 @@ async def on_left_chat_member(message: Message):
 async def handle_text(message: Message):
     chat_id = message.chat.id
     game = games.get(chat_id)
-        # Сохраняем пользователя в known_users (для команды /dolcebest)
-    known_users.setdefault(chat_id, {})[message.from_user.id] = get_user_name(message.from_user)
-    save_known_users(known_users)   # <-- ДОБАВЬ ЭТУ СТРОКУ
+    # Write the names cache only when the user is new or has changed their name.
+    if message.from_user and message.chat.type in ("group", "supergroup"):
+        name = get_user_name(message.from_user)
+        users = known_users.setdefault(chat_id, {})
+        if users.get(message.from_user.id) != name:
+            users[message.from_user.id] = name
+            save_known_users(known_users)
     if not game:
         return
 
@@ -983,7 +1145,7 @@ async def handle_text(message: Message):
         return
 
     if game.get("active") and game["state"] in ("playing_guess", "playing_intuition"):
-        user_answer = text.lower()
+        user_answer = normalize_answer(text)
         if not game.get("round_answered") and user_answer in game.get("current_aliases", []):
             game["round_answered"] = True
             game["current_aliases"] = []

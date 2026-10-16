@@ -1,0 +1,22 @@
+# Account and user data
+.env
+.env.*
+!.env.example
+/known_users.json
+/birthdays.json
+/activated_admins.json
+/dabest_excluded.json
+/scores.json
+/moderation_state.json
+/aliases.json
+/data/
+/temp/
+
+# Python/IDE
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+*.log
