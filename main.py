@@ -140,7 +140,7 @@ def save_excluded(data):
 dabest_excluded = load_excluded()
 
 # ---------- Настройки ----------
-TOKEN = "Token"
+TOKEN = "8700266151:AAElnV2fk7P-2sUdyErxcNeOezp0LlY6870"
 PHOTOS_BASE_DIR = "photos"
 INTUITION_FILE = "groups/intuitioninfo.txt"
 SCORES_FILE = "scores.json"
