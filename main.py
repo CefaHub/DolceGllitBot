@@ -1343,6 +1343,15 @@ async def handle_text(message: Message):
 
 # ---------- Запуск ----------
 async def main():
+    if not configured_join_link():
+        logger.warning(
+            "FULL JOIN LINK NOT CONFIGURED: send /dolcecreatelink in a private "
+            "admin chat, then set DOLCE_JOIN_INVITE_LINK on Bothost if "
+            "the data volume is not persistent. Join requests will be "
+            "rejected until a full bot-owned link is configured."
+        )
+    else:
+        logger.info("Full Telegram join link configured; exact matching enabled")
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_router)
