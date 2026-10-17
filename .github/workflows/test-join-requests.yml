@@ -1,0 +1,24 @@
+name: DolceBot join-request and regression tests
+on:
+  push:
+    branches: [fix/join-request-admin-delivery, main]
+    paths:
+      - 'main.py'
+      - 'tests/**'
+      - '.github/workflows/test-join-requests.yml'
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Syntax check
+        run: python -m py_compile main.py
+      - name: Run logic and join request tests
+        run: python -m unittest discover -s tests -v
