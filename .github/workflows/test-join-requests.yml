@@ -1,7 +1,7 @@
 name: DolceBot join-request and regression tests
 on:
   push:
-    branches: [fix/join-request-admin-delivery, main]
+    branches: [fix/full-invite-link-exact-match, main]
     paths:
       - 'main.py'
       - 'tests/**'

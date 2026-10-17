@@ -147,7 +147,11 @@ SCORES_FILE = "scores.json"
 MAX_ROUNDS = 20
 TIMEOUT_SECONDS = 60
 TEMP_DIR = "temp"
-ALLOWED_LINK_CODE = "ILO47yYNbjw1MDIy"               # твой код ссылки
+# The Telegram API redacts OTHER administrators' invitation links.
+# Only a full bot-created link is accepted, using an exact comparison.
+# Configure DOLCE_JOIN_INVITE_LINK in Bothost if DATA_DIR is not persistent.
+JOIN_LINK_FILE = "allowed_join_link.json"
+JOIN_LINK_ENV = "DOLCE_JOIN_INVITE_LINK"
 ACTIVATED_FILE = "activated_admins.json"
 ALIASES_FILE = "aliases.json"
 MODERATION_FILE = "moderation_state.json"
@@ -900,8 +904,64 @@ async def unban_user(message: Message):
 
 @router.message(Command("dolcelink"))
 async def cmd_dolcelink(message: Message):
-    await message.answer("🔗 Актуальная ссылка для входа:\nhttps://t.me/+ILO47yYNbjw1MDIy")
-        
+    link = configured_join_link()
+    if not link:
+        await message.answer(
+            "⚠️ Полная проверенная ссылка пока не настроена. "
+            "Администратор может создать её через /dolcecreatelink в личке с ботом."
+        )
+        return
+    await message.answer("🔗 Актуальная ссылка для входа:\n" + link)
+
+
+@router.message(Command("dolcecreatelink"), F.chat.type == "private")
+async def cmd_dolcecreatelink(message: Message):
+    """Create a full join-request URL OWNED by this bot, never a redacted admin URL."""
+    if not message.from_user or not is_admin(message.from_user.id):
+        await message.answer("❌ Только для администраторов в личных сообщениях.")
+        return
+    try:
+        bot_user = await message.bot.get_me()
+        invite = await message.bot.create_chat_invite_link(
+            chat_id=BIRTHDAY_CHAT_ID,
+            name="DolceBot verification",
+            creates_join_request=True,
+        )
+        link = invite.invite_link
+        if (invite.creator.id != bot_user.id or not invite.creates_join_request
+                or not is_complete_invite_link(link)):
+            logger.error("JOIN LINK CREATION FAILED: Telegram returned an invalid or redacted link")
+            await message.answer("❌ Telegram не выдал полную ссылку от имени бота.")
+            return
+    except Exception as exc:
+        logger.exception("Cannot create a bot-owned Telegram invite link")
+        await message.answer(
+            "❌ Не удалось создать ссылку. Проверь, что бот — администратор группы "
+            "с правом приглашать пользователей. Ошибка: " + str(exc)[:150]
+        )
+        return
+    try:
+        write_json(JOIN_LINK_FILE, {"chat_id": BIRTHDAY_CHAT_ID, "link": link})
+    except Exception:
+        logger.exception("JOIN LINK SAVE FAILED: DATA_DIR is not writable")
+        await message.answer(
+            "⚠️ Telegram создал ссылку, но хостинг не сохранил её. "
+            "Укажи её как секретную переменную DOLCE_JOIN_INVITE_LINK на Bothost, "
+            "перезапусти бота и проверь /joinstatus.\n\n"
+            + link
+        )
+        return
+    await message.answer(
+        "✅ Бот создал собственную ПОЛНУЮ ссылку для заявок. "
+        "Она сверяется целиком, без сокращений и совпадений по части текста.\n\n"
+        + link
+        + "\n\n⚠️ Если Bothost удаляет файлы при пересборке, сохрани эту же "
+          "полную ссылку в секретной переменной DOLCE_JOIN_INVITE_LINK. "
+          "Старую ссылку другого администратора Telegram продолжит скрывать. "
+          "Не создавай новую ссылку после каждого перезапуска."
+    )
+
+
 @router.message(Command("unmute"))
 async def unmute_user_by_reply(message: Message):
     if message.from_user.id not in ADMINS:
@@ -927,9 +987,35 @@ async def unmute_user_by_reply(message: Message):
         await message.answer(f"Ошибка: {e}")
 
 # ---------- Модерация заявок ----------
+def is_complete_invite_link(value: str | None) -> bool:
+    """Reject Telegram-redacted and partial URLs, not just shortened matches."""
+    return bool(
+        isinstance(value, str)
+        and re.fullmatch(r"https://t\.me/\+[A-Za-z0-9_-]{12,}", value)
+        and "…" not in value
+    )
+
+
+def configured_join_link() -> str | None:
+    """Secret full link from durable state, or Bothost environment on ephemeral disk.
+
+    Do not put the actual link into a PUBLIC GitHub repository or print it in logs.
+    """
+    stored = read_json(JOIN_LINK_FILE, {})
+    if isinstance(stored, dict) and stored.get("chat_id") == BIRTHDAY_CHAT_ID:
+        value = stored.get("link")
+        if is_complete_invite_link(value):
+            return value
+    env_value = os.environ.get(JOIN_LINK_ENV, "").strip()
+    if is_complete_invite_link(env_value):
+        return env_value
+    return None
+
+
 def is_allowed_join_link(invite_link: str | None) -> bool:
-    """Preserve the existing invite-code allowlist (do not change the secret)."""
-    return bool(invite_link and ALLOWED_LINK_CODE in invite_link)
+    """Only the entire bot-owned, configured Telegram link may pass."""
+    known = configured_join_link()
+    return bool(known and is_complete_invite_link(invite_link) and invite_link == known)
 
 
 async def notify_join_admins(bot: Bot, text: str, markup=None) -> int:
@@ -977,6 +1063,10 @@ async def cmd_joinstatus(message: Message):
         "Каждый админ должен хотя бы один раз открыть бота в личке и нажать /start.\n"
         "Если ни одному админу не дошло сообщение, проверь логи "
         "JOIN ADMIN DELIVERY FAILED / RESULT.\n"
+        "Режим: строгое совпадение ПОЛНОЙ ссылки без усечений.\n"
+        f"Полная ссылка настроена: <b>{'да' if configured_join_link() else 'нет'}</b>\n"
+        "Если файла нет после пересборки, укажи DOLCE_JOIN_INVITE_LINK на Bothost.\n"
+        "Бот должен САМ создать ссылку командой /dolcecreatelink.\n"
         "Заявки по другим ссылкам по-прежнему отклоняются.",
         parse_mode="HTML",
     )
@@ -990,8 +1080,11 @@ async def handle_join_request(request: types.ChatJoinRequest):
     allowed = is_allowed_join_link(invite_link)
 
     logger.info(
-        "JOIN REQUEST RECEIVED chat=%s user=%s allowed_link=%s invite_present=%s",
+        "JOIN REQUEST RECEIVED chat=%s user=%s allowed_link=%s "
+        "invite_present=%s redacted=%s configured=%s",
         chat_id, user.id, allowed, bool(invite_link),
+        bool(invite_link and ("…" in invite_link or "..." in invite_link)),
+        bool(configured_join_link()),
     )
     if allowed:
         pending_requests.setdefault(chat_id, set()).add(user.id)
@@ -1040,8 +1133,9 @@ async def handle_join_request(request: types.ChatJoinRequest):
     await notify_join_admins(
         request.bot,
         f"⚠️ Заявка от {user.mention_html()} {result}: "
-        "ссылка-приглашение отсутствует или отличается от разрешённой.\n"
-        "Проверь ссылку через /dolcelink и права бота в группе.",
+        "использована не та ПОЛНАЯ ссылка (либо Telegram скрыл чужую ссылку).\n"
+        "Создай ссылку через /dolcecreatelink и публикуй только её; "
+        "проверь /dolcelink и /joinstatus.",
     )
 
 
@@ -1249,6 +1343,15 @@ async def handle_text(message: Message):
 
 # ---------- Запуск ----------
 async def main():
+    if not configured_join_link():
+        logger.warning(
+            "FULL JOIN LINK NOT CONFIGURED: send /dolcecreatelink in a private "
+            "admin chat, then set DOLCE_JOIN_INVITE_LINK on Bothost if "
+            "the data volume is not persistent. Join requests will be "
+            "rejected until a full bot-owned link is configured."
+        )
+    else:
+        logger.info("Full Telegram join link configured; exact matching enabled")
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_router)

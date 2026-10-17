@@ -26,3 +26,6 @@ dabest_excluded.json
 scores.json
 moderation_state.json
 aliases.json
+
+# Bot-generated complete invitation URLs must stay out of public source and Docker image.
+allowed_join_link.json
