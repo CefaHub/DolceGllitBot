@@ -927,39 +927,123 @@ async def unmute_user_by_reply(message: Message):
         await message.answer(f"Ошибка: {e}")
 
 # ---------- Модерация заявок ----------
+def is_allowed_join_link(invite_link: str | None) -> bool:
+    """Preserve the existing invite-code allowlist (do not change the secret)."""
+    return bool(invite_link and ALLOWED_LINK_CODE in invite_link)
+
+
+async def notify_join_admins(bot: Bot, text: str, markup=None) -> int:
+    """Send to EVERY configured admin; DATA_DIR activation may be ephemeral.
+
+    Telegram still requires each recipient to have opened the bot personally.
+    Record failures so an empty/blocked admin inbox is never silent again.
+    """
+    delivered = 0
+    for admin_id in dict.fromkeys(ADMINS):
+        try:
+            await bot.send_message(
+                admin_id, text, parse_mode="HTML", reply_markup=markup
+            )
+            delivered += 1
+        except Exception as exc:
+            logger.warning(
+                "JOIN ADMIN DELIVERY FAILED admin=%s error=%s: %s",
+                admin_id, type(exc).__name__, str(exc)[:180],
+            )
+    logger.info(
+        "JOIN ADMIN DELIVERY RESULT delivered=%d total=%d activated=%d",
+        delivered, len(set(ADMINS)), len(activated.intersection(ADMINS)),
+    )
+    if not delivered:
+        logger.error(
+            "NO JOIN NOTIFICATIONS DELIVERED: admins must open the bot "
+            "privately and send /start; check permissions and BotHost DATA_DIR."
+        )
+    return delivered
+
+
+@router.message(Command("joinstatus"), F.chat.type == "private")
+async def cmd_joinstatus(message: Message):
+    if not message.from_user or not is_admin(message.from_user.id):
+        return await message.answer("❌ Только для администраторов.")
+    pending_count = sum(len(users) for users in pending_requests.values())
+    await message.answer(
+        "📨 <b>Проверка заявок DolceBot</b>\n"
+        f"Администраторов настроено: <b>{len(set(ADMINS))}</b>\n"
+        f"Отмечены активными: <b>{len(activated.intersection(ADMINS))}</b>\n"
+        f"Заявок в локальной очереди: <b>{pending_count}</b>\n"
+        "Уведомления отправляются всем настроенным администраторам, "
+        "даже если файл активации исчез после перезапуска.\n"
+        "Каждый админ должен хотя бы один раз открыть бота в личке и нажать /start.\n"
+        "Если ни одному админу не дошло сообщение, проверь логи "
+        "JOIN ADMIN DELIVERY FAILED / RESULT.\n"
+        "Заявки по другим ссылкам по-прежнему отклоняются.",
+        parse_mode="HTML",
+    )
+
+
 @router.chat_join_request()
 async def handle_join_request(request: types.ChatJoinRequest):
     chat_id = request.chat.id
     user = request.from_user
     invite_link = request.invite_link.invite_link if request.invite_link else None
+    allowed = is_allowed_join_link(invite_link)
 
-    logger.info("JOIN REQUEST RECEIVED chat=%s user=%s", chat_id, user.id)
-    if invite_link and ALLOWED_LINK_CODE in invite_link:
-        # Запоминаем, что пользователь пришёл по рабочей ссылке
+    logger.info(
+        "JOIN REQUEST RECEIVED chat=%s user=%s allowed_link=%s invite_present=%s",
+        chat_id, user.id, allowed, bool(invite_link),
+    )
+    if allowed:
         pending_requests.setdefault(chat_id, set()).add(user.id)
-        save_moderation_state()
-
-        for admin_id in ADMINS:
-            if admin_id not in activated:
-                continue
-            try:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="✅ Разрешить", callback_data=f"approve_join:{chat_id}:{user.id}"),
-                        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline_join:{chat_id}:{user.id}")
-                    ]
-                ])
-                await request.bot.send_message(
-                    admin_id,
-                    f"👤 {user.mention_html()} хочет войти по разрешённой ссылке.\nПринять или отклонить?",
-                    parse_mode="HTML",
-                    reply_markup=kb
-                )
-            except Exception as e:
-                print(f"Ошибка отправки админу {admin_id}: {e}")
+        try:
+            save_moderation_state()
+        except Exception:
+            logger.exception(
+                "Failed to persist join request; retaining it in memory: chat=%s user=%s",
+                chat_id, user.id,
+            )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="✅ Разрешить",
+                callback_data=f"approve_join:{chat_id}:{user.id}",
+            ),
+            InlineKeyboardButton(
+                text="❌ Отклонить",
+                callback_data=f"decline_join:{chat_id}:{user.id}",
+            ),
+        ]])
+        delivered = await notify_join_admins(
+            request.bot,
+            f"👤 {user.mention_html()} хочет войти по разрешённой ссылке.\n"
+            "Принять или отклонить?",
+            kb,
+        )
+        if not delivered:
+            logger.error(
+                "JOIN REQUEST WAITING WITHOUT ADMIN ALERT chat=%s user=%s",
+                chat_id, user.id,
+            )
         return
 
-    await request.decline()
+    # Keep the existing security policy. Previously these were declined
+    # without ANY diagnostic or admin notification.
+    try:
+        await request.decline()
+        logger.warning(
+            "JOIN REQUEST DECLINED: unsupported or missing invite link chat=%s user=%s",
+            chat_id, user.id,
+        )
+        result = "отклонена"
+    except Exception:
+        logger.exception("Could not decline request chat=%s user=%s", chat_id, user.id)
+        result = "не обработана из-за ошибки Telegram"
+    await notify_join_admins(
+        request.bot,
+        f"⚠️ Заявка от {user.mention_html()} {result}: "
+        "ссылка-приглашение отсутствует или отличается от разрешённой.\n"
+        "Проверь ссылку через /dolcelink и права бота в группе.",
+    )
+
 
 @router.callback_query(F.data.startswith("approve_join:"))
 async def approve_join(callback: CallbackQuery):
