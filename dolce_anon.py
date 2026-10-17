@@ -241,8 +241,13 @@ def create_anonymous_router(admins: list[int], data_dir: Path) -> Router:
         if not message.from_user or message.chat.type != "private":
             return
         content = direct_text if direct_text is not None else message.text
-        if content is not None and len(content) > MAX_TEXT:
-            await message.answer(f"⚠️ Слишком длинный текст. Максимум {MAX_TEXT} символов.")
+        if content is not None and (
+            len(content) > MAX_TEXT or len(html.escape(content)) > 3500
+        ):
+            await message.answer(
+                f"⚠️ Слишком длинный текст. Максимум {MAX_TEXT} символов "
+                "(специальные символы учитываются после экранирования)."
+            )
             return
         if direct_text is None and not is_supported_content(message):
             await message.answer("Можно отправить текст, фото, видео, голосовое или документ.")
@@ -334,7 +339,9 @@ def create_anonymous_router(admins: list[int], data_dir: Path) -> Router:
             await message.answer("Напиши текст ответа без команды или /anon_cancel.")
             return
         if not is_supported_content(message) or (
-            message.text is not None and len(message.text) > MAX_TEXT
+            message.text is not None and (
+                len(message.text) > MAX_TEXT or len(html.escape(message.text)) > 3500
+            )
         ):
             await message.answer("Ответь текстом до 3000 символов или отправь вложение.")
             return
