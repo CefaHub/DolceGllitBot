@@ -18,7 +18,10 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup,
+)
 
 logger = logging.getLogger(__name__)
 TICKET_FILE = "anonymous_admin_tickets.json"
@@ -27,6 +30,16 @@ MAX_TICKETS = 3000
 COOLDOWN_SECONDS = 60
 MAX_AGE_DAYS = 30
 SUPPORTED_MEDIA = ("photo", "video", "voice", "audio", "document", "animation", "video_note")
+ANON_BUTTON_TEXT = "📩 Анонимный вопрос"
+
+
+def anonymous_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent shortcut shown below the input field in the bot's private chat."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=ANON_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 class AnonymousQuestion(StatesGroup):
@@ -196,10 +209,38 @@ async def send_answer(bot: Bot, recipient_id: int, ticket_id: str, reply: Messag
         )
 
 
-def create_anonymous_router(admins: list[int], data_dir: Path) -> Router:
+def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> Router:
     router = Router(name="anonymous_admin_questions")
     tickets = AnonymousTicketStore(Path(data_dir) / TICKET_FILE)
     admin_ids = frozenset(admins)
+
+    async def ensure_member(message: Message) -> bool:
+        """Check membership on every question, including direct /anon submissions."""
+        if not message.from_user:
+            return False
+        try:
+            member = await message.bot.get_chat_member(
+                chat_id=chat_id, user_id=message.from_user.id
+            )
+        except Exception as exc:
+            logger.warning("ANON MEMBERSHIP CHECK FAILED error=%s", type(exc).__name__)
+            await message.answer("⚠️ Не удалось проверить участие в чате. Попробуйте позже.")
+            return False
+
+        if member.status in ("creator", "administrator", "member") or (
+            member.status == "restricted" and getattr(member, "is_member", False)
+        ):
+            return True
+
+        await message.answer("❌ Анонимные вопросы доступны только участникам чата Dolce.")
+        return False
+
+    async def prompt_for_question(message: Message, state: FSMContext):
+        if not await ensure_member(message):
+            await state.clear()
+            return
+        await state.set_state(AnonymousQuestion.waiting_for_question)
+        await message.answer("Отправьте анонимный вопрос")
 
     @router.message(Command("anon"), F.chat.type == "private")
     async def anon_command(message: Message, state: FSMContext):
@@ -210,18 +251,11 @@ def create_anonymous_router(admins: list[int], data_dir: Path) -> Router:
             await state.clear()
             await submit_question(message, direct_text=direct)
             return
-        await state.set_state(AnonymousQuestion.waiting_for_question)
-        await message.answer(
-            "📩 <b>Анонимный вопрос администрации Dolce</b>\n\n"
-            "Напиши свой вопрос или отправь фото, видео, голосовое сообщение "
-            "либо документ. Его получат <b>только администраторы бота</b>, "
-            "не участники чата.\n\n"
-            "Администраторы не увидят твоё имя, @username или Telegram ID. "
-            "Для доставки ответа бот временно хранит внутреннюю связь с автором. "
-            "Не отправляй личные данные в самом сообщении.\n\n"
-            "Отмена: /anon_cancel",
-            parse_mode="HTML",
-        )
+        await prompt_for_question(message, state)
+
+    @router.message(F.text == ANON_BUTTON_TEXT, F.chat.type == "private")
+    async def anon_keyboard_button(message: Message, state: FSMContext):
+        await prompt_for_question(message, state)
 
     @router.message(Command("anon"), F.chat.type.in_(("group", "supergroup")))
     async def anon_from_group(message: Message):
@@ -239,6 +273,8 @@ def create_anonymous_router(admins: list[int], data_dir: Path) -> Router:
 
     async def submit_question(message: Message, direct_text: str | None = None):
         if not message.from_user or message.chat.type != "private":
+            return
+        if not await ensure_member(message):
             return
         content = direct_text if direct_text is not None else message.text
         if content is not None and (
