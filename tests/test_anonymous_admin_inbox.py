@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from dolce_anon import (
-    AnonymousTicketStore, create_anonymous_router,
+    AnonymousTicketStore, create_anonymous_router, question_markup,
     send_to_admins, send_answer, ANON_BUTTON_TEXT, anonymous_keyboard,
     notify_other_admins_answered,
 )
@@ -72,13 +72,17 @@ class FakeState:
 
 
 class FakeMessage:
-    def __init__(self, bot, uid, text=None, mid=4, media=None):
+    def __init__(self, bot, uid, text=None, mid=4, media=None, reply_to_mid=None):
         self.bot = bot
         self.from_user = SimpleNamespace(
             id=uid, username="secret_user", full_name="Secret Person"
         )
         self.chat = SimpleNamespace(type="private", id=uid)
         self.message_id = mid
+        self.reply_to_message = (
+            SimpleNamespace(message_id=reply_to_mid)
+            if reply_to_mid is not None else None
+        )
         self.text = text
         self.answers = []
         for kind in ("photo", "video", "voice", "audio", "document", "animation", "video_note"):
@@ -132,6 +136,10 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         markup = self.bot.sent[0]["reply_markup"]
         self.assertTrue(markup.inline_keyboard[0][0].callback_data.startswith("anon:reply:"))
         self.assertNotIn("99887766", repr(markup))
+        self.assertEqual(len(markup.inline_keyboard[0]), 1)
+        self.assertNotIn("#", self.bot.sent[0]["text"])
+        self.assertNotIn("обращен", self.bot.sent[0]["text"].lower())
+        self.assertNotIn("#", msg.answers[0][0])
 
     async def test_full_flow_admin_reply_stays_anonymous(self):
         author = FakeMessage(self.bot, 99887766, "/anon When is next game?")
@@ -148,6 +156,7 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tomorrow at 18:00", delivered[0]["text"])
         self.assertNotIn("101", delivered[0]["text"])
         self.assertIsNone(await state.get_state())
+        self.assertEqual(delivered[0]["reply_parameters"].message_id, 4)
         notices = [m for m in self.bot.sent if m["chat_id"] == 202 and "уже ответил" in m["text"]]
         self.assertEqual(len(notices), 1)
         self.assertEqual(
@@ -156,17 +165,32 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(any("уже ответил" in m["text"] for m in self.bot.sent if m["chat_id"] == 101))
         another = FakeCallback(self.bot, 202, data)
-        await self.h["admin_reply_button"](another, FakeState())
-        self.assertIn("закрыто", another.responses[0][0])
+        next_state = FakeState()
+        await self.h["admin_reply_button"](another, next_state)
+        self.assertNotIn("недоступен", str(another.responses))
+        second_reply = FakeMessage(self.bot, 202, "One more answer")
+        await self.h["admin_answer_content"](second_reply, next_state)
+        delivered = [x for x in self.bot.sent if x["chat_id"] == 99887766]
+        self.assertEqual(len(delivered), 2)
+        self.assertIn("One more answer", delivered[1]["text"])
+        # The other admins get only one warning, even if more replies arrive.
+        notices = [m for m in self.bot.sent if "уже ответил" in m["text"]]
+        self.assertEqual(len(notices), 1)
 
     async def test_non_admin_cannot_answer_or_close(self):
         author = FakeMessage(self.bot, 99887766, "/anon Admins only")
         await self.h["anon_command"](author, FakeState())
         rows = self.bot.sent[0]["reply_markup"].inline_keyboard[0]
-        for item, handler in zip(rows, ("admin_reply_button", "admin_close_button")):
-            callback = FakeCallback(self.bot, 777, item.callback_data)
-            await self.h[handler](callback, FakeState())
-            self.assertIn("Только для администрации", callback.responses[0][0])
+        self.assertEqual(len(rows), 1)
+        reply = FakeCallback(self.bot, 777, rows[0].callback_data)
+        await self.h["admin_reply_button"](reply, FakeState())
+        self.assertIn("Только для администрации", reply.responses[0][0])
+        # The legacy Close button is ignored, even on older question messages.
+        legacy_close = FakeCallback(
+            self.bot, 777, rows[0].callback_data.replace("anon:reply:", "anon:close:")
+        )
+        await self.h["admin_close_button"](legacy_close, FakeState())
+        self.assertIn("Только для администрации", legacy_close.responses[0][0])
         self.assertFalse(any(m["chat_id"] == 777 for m in self.bot.sent))
 
     async def test_video_or_voice_uses_copy_not_forward_with_no_sender_label(self):
@@ -180,17 +204,22 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([x["chat_id"] for x in self.bot.sent], [101, 202])
             self.assertNotIn("99887766", self.bot.sent[0]["text"])
 
-    async def test_ticket_mapping_persists_and_deletes_sender_when_closed(self):
+    async def test_question_mapping_remains_after_answer(self):
         store = AnonymousTicketStore(self.path / "tickets.json")
-        ticket, seconds = await store.issue(555123)
+        ticket, seconds = await store.issue(555123, author_message_id=345)
         self.assertEqual(seconds, 0)
         self.assertRegex(ticket, r"^[a-f0-9]{12}$")
         reopened = AnonymousTicketStore(self.path / "tickets.json")
         self.assertEqual((await reopened.get_open(ticket))["sender"], 555123)
-        self.assertTrue(await reopened.close(ticket))
-        self.assertIsNone(await reopened.get_open(ticket))
+        self.assertEqual((await reopened.get_open(ticket))["author_message_id"], 345)
+        self.assertTrue(await reopened.mark_first_answer(ticket))
+        self.assertFalse(await reopened.mark_first_answer(ticket))
+        again = await store.get_open(ticket)
+        self.assertEqual(again["sender"], 555123)
+        self.assertTrue(again["answered"])
         raw = json.loads((self.path / "tickets.json").read_text())
-        self.assertNotIn("sender", raw[ticket])
+        self.assertEqual(raw[ticket]["status"], "open")
+        self.assertEqual(raw[ticket]["sender"], 555123)
 
     async def test_spam_control_and_delivery_failure(self):
         first = FakeMessage(self.bot, 99887766, "/anon One")
@@ -280,8 +309,11 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notices[0]["chat_id"], 202)
         self.assertEqual(notices[0]["reply_parameters"].message_id, first_msg["message_id"])
         record = json.loads((self.path / "anonymous_admin_tickets.json").read_text())
-        self.assertNotIn("sender", next(iter(record.values())))
-        self.assertNotIn("admin_messages", next(iter(record.values())))
+        entry = next(iter(record.values()))
+        self.assertEqual(entry["sender"], 99887766)
+        self.assertTrue(entry["answered"])
+        self.assertIn("admin_messages", entry)
+        self.assertEqual(entry["author_message_id"], 4)
 
     async def test_notification_for_attachment_replies_to_ticket_prompt(self):
         author = FakeMessage(self.bot, 99887766, media="photo")
@@ -325,7 +357,9 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
             for reply, state in zip(replies, states)
         ))
         deliveries = [m for m in self.bot.sent if m["chat_id"] == 99887766]
-        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(len(deliveries), 2)
+        self.assertTrue(any("First" in m["text"] for m in deliveries))
+        self.assertTrue(any("Second" in m["text"] for m in deliveries))
         notices = [m for m in self.bot.sent if "уже ответил" in m["text"]]
         self.assertEqual(len(notices), 1)
 
@@ -335,6 +369,102 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         notice = self.bot.sent[-1]
         self.assertEqual(notice["chat_id"], 202)
         self.assertEqual(notice["reply_parameters"].message_id, 6)
+
+    async def test_reply_directly_to_admin_question_without_button(self):
+        author = FakeMessage(self.bot, 99887766, "/anon Please help", mid=45)
+        await self.h["anon_command"](author, FakeState())
+        message = next(m for m in self.bot.sent if m["chat_id"] == 101)
+        store = AnonymousTicketStore(self.path / "anonymous_admin_tickets.json")
+        question_id = await store.find_for_admin_reply(101, message["message_id"])
+        self.assertIsNotNone(question_id)
+        answer = FakeMessage(self.bot, 101, "Yes, hello!", reply_to_mid=message["message_id"])
+        await self.h["admin_reply_to_question"](answer, FakeState(), anon_question_id=question_id)
+        received = next(m for m in self.bot.sent if m["chat_id"] == 99887766)
+        self.assertIn("Yes, hello!", received["text"])
+        self.assertEqual(received["reply_parameters"].message_id, 45)
+        self.assertNotIn("101", received["text"])
+        self.assertNotIn("#", received["text"])
+
+        again = FakeMessage(self.bot, 101, "And one more tip", reply_to_mid=message["message_id"])
+        await self.h["admin_reply_to_question"](again, FakeState(), anon_question_id=question_id)
+        received = [m for m in self.bot.sent if m["chat_id"] == 99887766]
+        self.assertEqual(len(received), 2)
+        self.assertEqual(
+            len([m for m in self.bot.sent if "уже ответил" in m["text"]]), 1
+        )
+
+    async def test_reply_to_copied_media_after_restart(self):
+        author = FakeMessage(self.bot, 99887766, media="photo", mid=62)
+        await self.h["anon_question_content"](author, FakeState())
+        store = AnonymousTicketStore(self.path / "anonymous_admin_tickets.json")
+        record = next(iter(json.loads((self.path / "anonymous_admin_tickets.json").read_text()).values()))
+        media_message_id = record["admin_media_messages"]["202"]
+        question_id = await store.find_for_admin_reply(202, media_message_id)
+        self.assertIsNotNone(question_id)
+        # A new router can still resolve the reply using saved IDs.
+        new_router = create_anonymous_router([101, 202], self.path, -10098765)
+        answer = FakeMessage(self.bot, 202, "Got the photo", reply_to_mid=media_message_id)
+        await handlers(new_router)["admin_reply_to_question"](
+            answer, FakeState(), anon_question_id=question_id
+        )
+        received = next(m for m in self.bot.sent if m["chat_id"] == 99887766)
+        self.assertIn("Got the photo", received["text"])
+        self.assertEqual(received["reply_parameters"].message_id, 62)
+
+    async def test_reply_to_other_question_overrides_button_draft(self):
+        await self.h["anon_command"](
+            FakeMessage(self.bot, 99887766, "/anon Question A"), FakeState()
+        )
+        await self.h["anon_command"](
+            FakeMessage(self.bot, 88776655, "/anon Question B"), FakeState()
+        )
+        first = next(m for m in self.bot.sent if m["chat_id"] == 101)
+        second = [m for m in self.bot.sent if m["chat_id"] == 101][1]
+        click = first["reply_markup"].inline_keyboard[0][0].callback_data
+        state = FakeState()
+        await self.h["admin_reply_button"](FakeCallback(self.bot, 101, click), state)
+        reply = FakeMessage(self.bot, 101, "Answer B", reply_to_mid=second["message_id"])
+        await self.h["admin_answer_content"](reply, state)
+        delivery = [m for m in self.bot.sent if m["chat_id"] == 88776655]
+        self.assertEqual(len(delivery), 1)
+        self.assertIn("Answer B", delivery[0]["text"])
+        self.assertEqual(len([m for m in self.bot.sent if m["chat_id"] == 99887766]), 0)
+
+    async def test_legacy_close_button_does_not_close_question(self):
+        await self.h["anon_command"](
+            FakeMessage(self.bot, 99887766, "/anon Question"), FakeState()
+        )
+        callback_data = self.bot.sent[0]["reply_markup"].inline_keyboard[0][0].callback_data
+        callback = FakeCallback(
+            self.bot, 101, callback_data.replace("anon:reply:", "anon:close:")
+        )
+        await self.h["admin_close_button"](callback, FakeState())
+        self.assertIn("Закрытие отключено", callback.responses[0][0])
+        state = FakeState()
+        await self.h["admin_reply_button"](
+            FakeCallback(self.bot, 101, callback_data), state
+        )
+        sent = FakeMessage(self.bot, 101, "Still replying")
+        await self.h["admin_answer_content"](sent, state)
+        self.assertEqual(len([m for m in self.bot.sent if m["chat_id"] == 99887766]), 1)
+
+    async def test_simple_text_no_ticket_words(self):
+        author = FakeMessage(self.bot, 99887766, "/anon hello")
+        await self.h["anon_command"](author, FakeState())
+        admin_question = self.bot.sent[0]["text"]
+        self.assertNotIn("#", admin_question)
+        self.assertNotIn("обращен", admin_question.lower())
+        self.assertNotIn("тикет", admin_question.lower())
+        answer_callback = self.bot.sent[0]["reply_markup"].inline_keyboard[0][0].callback_data
+        state = FakeState()
+        await self.h["admin_reply_button"](FakeCallback(self.bot, 101, answer_callback), state)
+        self.assertNotIn("обращен", str(self.bot.sent).lower())
+        admin_reply = FakeMessage(self.bot, 101, "world")
+        await self.h["admin_answer_content"](admin_reply, state)
+        received = next(m for m in self.bot.sent if m["chat_id"] == 99887766)
+        self.assertIn("world", received["text"])
+        self.assertNotIn("#", received["text"])
+        self.assertNotIn("обращен", received["text"].lower())
 
     async def test_no_anon_user_delivery_to_other_member(self):
         msg = FakeMessage(self.bot, 99887766, "/anon What happens next?")
