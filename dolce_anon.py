@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, ReplyKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyParameters,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,19 @@ class AnonymousTicketStore:
                 return None
             return dict(value)
 
+    async def set_admin_messages(self, ticket_id: str, message_ids: dict[int, int]) -> None:
+        """Store reply targets for administrator notifications, not sender attribution."""
+        async with self._lock:
+            data = self._load()
+            if ticket_id not in data or data[ticket_id].get("status") != "open":
+                return
+            data[ticket_id]["admin_messages"] = {
+                str(admin_id): message_id
+                for admin_id, message_id in message_ids.items()
+                if isinstance(admin_id, int) and isinstance(message_id, int)
+            }
+            self._save(data)
+
     async def close(self, ticket_id: str) -> bool:
         async with self._lock:
             data = self._load()
@@ -127,6 +140,7 @@ class AnonymousTicketStore:
             data[ticket_id]["status"] = "closed"
             # Once answered/closed, we no longer need to retain sender identity.
             data[ticket_id].pop("sender", None)
+            data[ticket_id].pop("admin_messages", None)
             self._save(data)
             return True
 
@@ -151,13 +165,16 @@ def question_markup(ticket_id: str):
     ]])
 
 
-async def send_to_admins(bot: Bot, admins: list[int], ticket_id: str, message: Message) -> int:
-    """No forward_* API; copy_message strips Telegram's forward attribution."""
+async def send_to_admins(
+    bot: Bot, admins: list[int], ticket_id: str, message: Message,
+    sent_message_ids: dict[int, int] | None = None,
+) -> int:
+    """Copy anonymously; optionally record per-admin message IDs for later reply status."""
     delivered = 0
     for admin_id in dict.fromkeys(admins):
         try:
             if message.text is not None:
-                await bot.send_message(
+                sent = await bot.send_message(
                     admin_id,
                     f"📩 <b>Анонимный вопрос #{ticket_id}</b>\n\n"
                     + html.escape(message.text),
@@ -172,7 +189,7 @@ async def send_to_admins(bot: Bot, admins: list[int], ticket_id: str, message: M
                     from_chat_id=message.chat.id,
                     message_id=message.message_id,
                 )
-                await bot.send_message(
+                sent = await bot.send_message(
                     admin_id,
                     f"📩 <b>Анонимное обращение #{ticket_id}</b> — вложение выше. "
                     "Ответить можно кнопкой.",
@@ -180,6 +197,8 @@ async def send_to_admins(bot: Bot, admins: list[int], ticket_id: str, message: M
                     reply_markup=question_markup(ticket_id),
                 )
             delivered += 1
+            if sent_message_ids is not None and isinstance(getattr(sent, "message_id", None), int):
+                sent_message_ids[admin_id] = sent.message_id
         except Exception as exc:
             logger.warning(
                 "ANON ADMIN DELIVERY FAILED admin=%s error=%s",
@@ -187,6 +206,28 @@ async def send_to_admins(bot: Bot, admins: list[int], ticket_id: str, message: M
             )
     logger.info("ANON ADMIN DELIVERY delivered=%d total=%d", delivered, len(set(admins)))
     return delivered
+
+
+async def notify_other_admins_answered(
+    bot: Bot, admin_messages: dict[str, int], answering_admin_id: int,
+) -> None:
+    """Reply to each other admin's original anonymous question after delivery succeeds."""
+    for admin_id_str, message_id in admin_messages.items():
+        try:
+            admin_id = int(admin_id_str)
+            if admin_id == answering_admin_id or not isinstance(message_id, int):
+                continue
+            await bot.send_message(
+                admin_id,
+                "✅ Один из администраторов уже ответил на это сообщение.",
+                reply_parameters=ReplyParameters(
+                    message_id=message_id, allow_sending_without_reply=True
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "ANON ANSWER NOTIFICATION FAILED error=%s", type(exc).__name__
+            )
 
 
 async def send_answer(bot: Bot, recipient_id: int, ticket_id: str, reply: Message):
@@ -213,6 +254,8 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
     router = Router(name="anonymous_admin_questions")
     tickets = AnonymousTicketStore(Path(data_dir) / TICKET_FILE)
     admin_ids = frozenset(admins)
+    # Prevent simultaneous answers / manual closes from racing the first response.
+    answering_lock = asyncio.Lock()
 
     async def ensure_member(message: Message) -> bool:
         """Check membership on every question, including direct /anon submissions."""
@@ -301,10 +344,18 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
                 })()
             else:
                 proxy = message
-            delivered = await send_to_admins(message.bot, admins, ticket_id, proxy)
+            admin_message_ids: dict[int, int] = {}
+            delivered = await send_to_admins(
+                message.bot, admins, ticket_id, proxy, sent_message_ids=admin_message_ids
+            )
         except Exception:
             logger.exception("ANON MESSAGE DISPATCH ERROR ticket=%s", ticket_id)
             delivered = 0
+        if delivered and admin_message_ids:
+            try:
+                await tickets.set_admin_messages(ticket_id, admin_message_ids)
+            except Exception:
+                logger.exception("ANON ADMIN MESSAGE IDS SAVE FAILED ticket=%s", ticket_id)
         if not delivered:
             await tickets.discard(ticket_id)
             await message.answer(
@@ -360,7 +411,9 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
         if not await require_admin(callback):
             return
         ticket_id = (callback.data or "").removeprefix("anon:close:")
-        if await tickets.close(ticket_id):
+        async with answering_lock:
+            closed = await tickets.close(ticket_id)
+        if closed:
             await callback.answer("Обращение закрыто.")
             await callback.message.answer(f"✅ Анонимное обращение #{ticket_id} закрыто.")
         else:
@@ -382,21 +435,27 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
             await message.answer("Ответь текстом до 3000 символов или отправь вложение.")
             return
         thread = (await state.get_data()).get("anon_ticket")
-        record = await tickets.get_open(thread) if thread else None
-        if not record:
-            await state.clear()
-            await message.answer("Обращение уже закрыто, ответ не отправлен.")
-            return
-        try:
-            await send_answer(message.bot, record["sender"], thread, message)
-        except Exception as exc:
-            logger.warning(
-                "ANON REPLY DELIVERY FAILED ticket=%s error=%s", thread, type(exc).__name__
-            )
-            await message.answer("⚠️ Ответ не доставлен: автор заблокировал бота или недоступен.")
-            return
-        await tickets.close(thread)
+        async with answering_lock:
+            record = await tickets.get_open(thread) if thread else None
+            if not record:
+                await state.clear()
+                await message.answer("Обращение уже закрыто, ответ не отправлен.")
+                return
+            try:
+                await send_answer(message.bot, record["sender"], thread, message)
+            except Exception as exc:
+                logger.warning(
+                    "ANON REPLY DELIVERY FAILED ticket=%s error=%s", thread, type(exc).__name__
+                )
+                await message.answer("⚠️ Ответ не доставлен: автор заблокировал бота или недоступен.")
+                return
+            await tickets.close(thread)
+
         await state.clear()
+        # Notify others only after the author has actually received the answer.
+        await notify_other_admins_answered(
+            message.bot, record.get("admin_messages", {}), message.from_user.id
+        )
         await message.answer(f"✅ Ответ на анонимный вопрос #{thread} доставлен.")
 
     return router
