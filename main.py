@@ -991,7 +991,7 @@ def is_complete_invite_link(value: str | None) -> bool:
     """Reject Telegram-redacted and partial URLs, not just shortened matches."""
     return bool(
         isinstance(value, str)
-        and re.fullmatch(r"https://t\\.me/\\+[A-Za-z0-9_-]{12,}", value)
+        and re.fullmatch(r"https://t\.me/\+[A-Za-z0-9_-]{12,}", value)
         and "…" not in value
     )
 
