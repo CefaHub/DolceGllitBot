@@ -53,6 +53,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from dolce_anon import create_anonymous_router
 from aiogram.types import (
     Message,
     FSInputFile,
@@ -449,7 +450,10 @@ async def cmd_start(message: Message):
         save_activated()
         await message.answer("✅ Вы активированы как администратор. Теперь вы будете получать уведомления о заявках.")
     else:
-        await message.answer("У вас нет прав администратора.")
+        await message.answer(
+            "Привет! 👋 Чтобы анонимно задать вопрос администрации Dolce, "
+            "отправь /anon. Твои имя, ник и Telegram ID администраторам не передаются."
+        )
 
 # ---------- Админ-панель ----------
 @admin_router.message(Command("da"), F.chat.type == "private")
@@ -1381,6 +1385,7 @@ async def main():
     bot = Bot(token=TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin_router)
+    dp.include_router(create_anonymous_router(ADMINS, DATA_DIR))
     dp.include_router(router)
     Path(TEMP_DIR).mkdir(exist_ok=True)
     asyncio.create_task(check_birthdays(bot))
