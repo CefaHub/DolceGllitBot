@@ -479,25 +479,25 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
             show_alert=True,
         )
 
-    async def deliver_admin_answer(message: Message, question_id: str) -> None:
+    async def deliver_admin_answer(message: Message, question_id: str) -> bool:
         if not message.from_user or message.from_user.id not in admin_ids:
-            return
+            return False
         if message.text and message.text.startswith("/"):
             await message.answer("Отправьте ответ без команды.")
-            return
+            return False
         if not is_supported_content(message) or (
             message.text is not None and (
                 len(message.text) > MAX_TEXT or len(html.escape(message.text)) > 3500
             )
         ):
             await message.answer("Отправьте текст до 3000 символов или вложение.")
-            return
+            return False
 
         async with answering_lock:
             record = await tickets.get_open(question_id)
             if not record:
                 await message.answer("Этот анонимный вопрос больше недоступен.")
-                return
+                return False
             try:
                 await send_answer(
                     message.bot, record["sender"], question_id, message,
@@ -509,7 +509,7 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
                     question_id, type(exc).__name__,
                 )
                 await message.answer("⚠️ Ответ не доставлен. Попробуйте позже.")
-                return
+                return False
             first_answer = await tickets.mark_first_answer(question_id)
 
         if first_answer:
@@ -517,6 +517,7 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
                 message.bot, record.get("admin_messages", {}), message.from_user.id
             )
         await message.answer("✅ Ответ отправлен анонимно.")
+        return True
 
     @router.message(AnonymousAdminReply.waiting_for_answer, F.chat.type == "private")
     async def admin_answer_content(message: Message, state: FSMContext):
@@ -535,9 +536,9 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
             await state.clear()
             await message.answer("Нажмите «Ответить» под вопросом или ответьте через Reply.")
             return
-        await deliver_admin_answer(message, question_id)
-        # A button opens one draft; press it again for more answers. Reply needs no button.
-        await state.clear()
+        if await deliver_admin_answer(message, question_id):
+            # Keep the draft active when Telegram could not deliver the answer.
+            await state.clear()
 
     @router.message(QuestionReplyFilter())
     async def admin_reply_to_question(
