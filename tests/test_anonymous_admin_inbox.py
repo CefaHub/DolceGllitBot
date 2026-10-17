@@ -8,15 +8,25 @@ from types import SimpleNamespace
 
 from dolce_anon import (
     AnonymousTicketStore, create_anonymous_router,
-    send_to_admins, send_answer,
+    send_to_admins, send_answer, ANON_BUTTON_TEXT, anonymous_keyboard,
 )
 
 
 class FakeBot:
-    def __init__(self, blocked=()):
+    def __init__(self, blocked=(), member_statuses=None, membership_error=False):
         self.blocked = set(blocked)
         self.sent = []
         self.copied = []
+        self.member_statuses = member_statuses or {}
+        self.membership_error = membership_error
+        self.membership_checks = []
+
+    async def get_chat_member(self, chat_id, user_id):
+        self.membership_checks.append((chat_id, user_id))
+        if self.membership_error:
+            raise RuntimeError("Telegram membership lookup unavailable")
+        status, is_member = self.member_statuses.get(user_id, ("member", True))
+        return SimpleNamespace(status=status, is_member=is_member)
 
     async def send_message(self, chat_id, text, **kwargs):
         if chat_id in self.blocked:
@@ -93,7 +103,7 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
-        self.router = create_anonymous_router([101, 202], self.path)
+        self.router = create_anonymous_router([101, 202], self.path, -10098765)
         self.h = handlers(self.router)
         self.bot = FakeBot()
 
@@ -184,9 +194,58 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         state = FakeState()
         await self.h["anon_command"](msg, state)
         self.assertIsNotNone(await state.get_state())
-        self.assertIn("только администраторы", msg.answers[0][0])
+        self.assertEqual(msg.answers[0][0], "Отправьте анонимный вопрос")
         await self.h["anon_cancel"](msg, state)
         self.assertIsNone(await state.get_state())
+
+    async def test_button_opens_same_short_prompt(self):
+        button = anonymous_keyboard().keyboard[0][0]
+        self.assertEqual(button.text, ANON_BUTTON_TEXT)
+        self.assertTrue(anonymous_keyboard().is_persistent)
+        msg = FakeMessage(self.bot, 99887766, ANON_BUTTON_TEXT)
+        state = FakeState()
+        await self.h["anon_keyboard_button"](msg, state)
+        self.assertEqual(msg.answers[0][0], "Отправьте анонимный вопрос")
+        self.assertIsNotNone(await state.get_state())
+        self.assertEqual(self.bot.membership_checks, [(-10098765, 99887766)])
+
+    async def test_nonmembers_cannot_start_or_send_questions(self):
+        for status, is_member in (("left", False), ("kicked", False), ("restricted", False)):
+            bot = FakeBot(member_statuses={99887766: (status, is_member)})
+            start = FakeMessage(bot, 99887766, "/anon")
+            state = FakeState()
+            await self.h["anon_command"](start, state)
+            self.assertIn("только участникам чата", start.answers[0][0])
+            self.assertIsNone(await state.get_state())
+
+            direct = FakeMessage(bot, 99887766, "/anon Secret question")
+            await self.h["anon_command"](direct, FakeState())
+            self.assertIn("только участникам чата", direct.answers[0][0])
+            self.assertEqual(bot.sent, [])
+
+    async def test_member_restricted_with_is_member_can_ask(self):
+        bot = FakeBot(member_statuses={99887766: ("restricted", True)})
+        msg = FakeMessage(bot, 99887766, "/anon Allowed")
+        await self.h["anon_command"](msg, FakeState())
+        self.assertEqual({x["chat_id"] for x in bot.sent}, {101, 202})
+
+    async def test_membership_rechecked_after_prompt_before_sending(self):
+        bot = FakeBot()
+        start = FakeMessage(bot, 99887766, "/anon")
+        state = FakeState()
+        await self.h["anon_command"](start, state)
+        bot.member_statuses[99887766] = ("left", False)
+        question = FakeMessage(bot, 99887766, "Am I still a member?")
+        await self.h["anon_question_content"](question, state)
+        self.assertIn("только участникам чата", question.answers[0][0])
+        self.assertEqual(bot.sent, [])
+
+    async def test_membership_check_failure_blocks_submission(self):
+        bot = FakeBot(membership_error=True)
+        question = FakeMessage(bot, 99887766, "/anon Secret question")
+        await self.h["anon_command"](question, FakeState())
+        self.assertIn("Не удалось проверить участие", question.answers[0][0])
+        self.assertEqual(bot.sent, [])
 
     async def test_no_anon_user_delivery_to_other_member(self):
         msg = FakeMessage(self.bot, 99887766, "/anon What happens next?")
