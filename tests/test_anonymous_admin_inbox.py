@@ -155,7 +155,7 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delivered), 1)
         self.assertIn("Tomorrow at 18:00", delivered[0]["text"])
         self.assertNotIn("101", delivered[0]["text"])
-        self.assertIsNone(await state.get_state())
+        self.assertIsNotNone(await state.get_state())
         self.assertEqual(delivered[0]["reply_parameters"].message_id, 4)
         notices = [m for m in self.bot.sent if m["chat_id"] == 202 and "уже ответил" in m["text"]]
         self.assertEqual(len(notices), 1)
@@ -173,6 +173,11 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         delivered = [x for x in self.bot.sent if x["chat_id"] == 99887766]
         self.assertEqual(len(delivered), 2)
         self.assertIn("One more answer", delivered[1]["text"])
+        await self.h["admin_answer_content"](FakeMessage(self.bot, 202, "Third answer"), next_state)
+        delivered = [x for x in self.bot.sent if x["chat_id"] == 99887766]
+        self.assertEqual(len(delivered), 3)
+        self.assertIn("Third answer", delivered[2]["text"])
+        self.assertIsNotNone(await next_state.get_state())
         # The other admins get only one warning, even if more replies arrive.
         notices = [m for m in self.bot.sent if "уже ответил" in m["text"]]
         self.assertEqual(len(notices), 1)
@@ -429,6 +434,14 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delivery), 1)
         self.assertIn("Answer B", delivery[0]["text"])
         self.assertEqual(len([m for m in self.bot.sent if m["chat_id"] == 99887766]), 0)
+        question_map = json.loads((self.path / "anonymous_admin_tickets.json").read_text())
+        question_b_id = next(
+            qid for qid, record in question_map.items()
+            if record.get("sender") == 88776655
+        )
+        self.assertEqual((await state.get_data())["anon_ticket"], question_b_id)
+        await self.h["admin_answer_content"](FakeMessage(self.bot, 101, "More on B"), state)
+        self.assertEqual(len([m for m in self.bot.sent if m["chat_id"] == 88776655]), 2)
 
     async def test_legacy_close_button_does_not_close_question(self):
         await self.h["anon_command"](
