@@ -29,3 +29,6 @@ aliases.json
 
 # Bot-generated complete invitation URLs must stay out of public source and Docker image.
 allowed_join_link.json
+
+# Anon inbox contains private sender-to-ticket mappings; never commit to Git.
+anonymous_admin_tickets.json
