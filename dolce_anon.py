@@ -466,7 +466,7 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
         await callback.message.answer(
             "✍️ Отправьте ответ на анонимный вопрос. "
             "Автор не узнает, кто из администраторов ответил. "
-            "На один вопрос можно отвечать несколько раз. Отмена: /anon_cancel"
+            "Можно отправлять несколько ответов подряд. Для завершения: /anon_cancel"
         )
 
     @router.callback_query(F.data.startswith("anon:close:"))
@@ -536,9 +536,11 @@ def create_anonymous_router(admins: list[int], data_dir: Path, chat_id: int) -> 
             await state.clear()
             await message.answer("Нажмите «Ответить» под вопросом или ответьте через Reply.")
             return
-        if await deliver_admin_answer(message, question_id):
-            # Keep the draft active when Telegram could not deliver the answer.
-            await state.clear()
+        # Reply explicitly chooses the thread; subsequent plain messages follow it.
+        if replied_question_id and replied_question_id != stored_question_id:
+            await state.update_data(anon_ticket=replied_question_id)
+        # Remain in answer mode for unlimited consecutive messages until /anon_cancel.
+        await deliver_admin_answer(message, question_id)
 
     @router.message(QuestionReplyFilter())
     async def admin_reply_to_question(
