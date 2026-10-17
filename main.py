@@ -48,6 +48,7 @@ def normalized_aliases(values):
 
 
 from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -916,9 +917,16 @@ async def cmd_dolcelink(message: Message):
 
 @router.message(Command("dolcecreatelink"), F.chat.type == "private")
 async def cmd_dolcecreatelink(message: Message):
-    """Create a full join-request URL OWNED by this bot, never a redacted admin URL."""
+    """Create the first bot-owned link ONCE; repeated calls reuse it."""
     if not message.from_user or not is_admin(message.from_user.id):
         await message.answer("❌ Только для администраторов в личных сообщениях.")
+        return
+    already_configured = configured_join_link()
+    if already_configured:
+        await message.answer(
+            "🔒 Полная ссылка уже настроена. Новая ссылка НЕ создавалась, "
+            "старая НЕ удалялась. Используй текущую:\n\n" + already_configured
+        )
         return
     try:
         bot_user = await message.bot.get_me()
@@ -1139,6 +1147,24 @@ async def handle_join_request(request: types.ChatJoinRequest):
     )
 
 
+async def edit_moderation_status(message: Message, new_text: str) -> None:
+    """Editing the same moderation status is benign and should not crash a callback.
+
+    Telegram may report 'message is not modified' for a retry or a duplicated
+    button message. This is NOT an unmute failure. Other Telegram errors should
+    still be visible in the logs for diagnosis.
+    """
+    if message.text == new_text and not message.reply_markup:
+        return
+    try:
+        await message.edit_text(new_text)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            logger.info("MODERATION STATUS ALREADY UPDATED: %s", new_text)
+            return
+        raise
+
+
 @router.callback_query(F.data.startswith("approve_join:"))
 async def approve_join(callback: CallbackQuery):
     if not await require_admin_callback(callback):
@@ -1168,7 +1194,7 @@ async def approve_join(callback: CallbackQuery):
     except Exception:
         logger.exception("User approved but failed to mute: chat=%s user=%s", chat_id, user_id)
         await callback.answer("Заявка одобрена, но не удалось заглушить!", show_alert=True)
-        await callback.message.edit_text("⚠️ Пользователь одобрен, но автоматическое ограничение не сработало.")
+        await edit_moderation_status(callback.message, "⚠️ Пользователь одобрен, но автоматическое ограничение не сработало.")
         return
     awaiting_unmute.setdefault(chat_id, set()).add(user_id)
     save_moderation_state()
@@ -1184,7 +1210,7 @@ async def approve_join(callback: CallbackQuery):
     except Exception:
         logger.exception("Failed to notify admin about unmute")
     await callback.answer("Заявка одобрена")
-    await callback.message.edit_text("✅ Заявка одобрена, пользователь заглушен.")
+    await edit_moderation_status(callback.message, "✅ Заявка одобрена, пользователь заглушен.")
 
 @router.callback_query(F.data.startswith("decline_join:"))
 async def decline_join(callback: CallbackQuery):
@@ -1207,7 +1233,7 @@ async def decline_join(callback: CallbackQuery):
     pending_requests[chat_id].discard(user_id)
     save_moderation_state()
     await callback.answer("Заявка отклонена")
-    await callback.message.edit_text("❌ Заявка отклонена.")
+    await edit_moderation_status(callback.message, "❌ Заявка отклонена.")
 
 @router.callback_query(F.data.startswith("unmute:"))
 async def unmute_user(callback: CallbackQuery):
@@ -1232,7 +1258,7 @@ async def unmute_user(callback: CallbackQuery):
     awaiting_unmute[chat_id].discard(user_id)
     save_moderation_state()
     await callback.answer("Пользователь размучен")
-    await callback.message.edit_text("✅ Пользователь получил доступ к чату.")
+    await edit_moderation_status(callback.message, "✅ Пользователь получил доступ к чату.")
 
 # Обработка новых участников
 @router.message(F.new_chat_members)

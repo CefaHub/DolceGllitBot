@@ -198,6 +198,7 @@ class JoinDeliveryTests(unittest.TestCase):
 
     def test_bot_creates_join_request_link_and_saves_full_value(self):
         ns = functions()
+        ns["read_json"] = lambda *a: {}  # first run has no configured link
         saved = {}
         ns["write_json"] = lambda name, data: saved.update({"file": name, **data})
         bot = FakeBot()
@@ -216,6 +217,24 @@ class JoinDeliveryTests(unittest.TestCase):
         self.assertEqual(saved["link"], FULL_LINK)
         self.assertEqual(saved["chat_id"], -100123)
         self.assertIn(FULL_LINK, replies[0])
+
+    def test_cannot_regenerate_already_configured_invitation(self):
+        ns = functions()
+        bot = FakeBot()
+        replies = []
+
+        async def answer(text):
+            replies.append(text)
+
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=101),
+            bot=bot,
+            answer=answer,
+        )
+        asyncio.run(ns["cmd_dolcecreatelink"](message))
+        self.assertFalse(bot.created, "An active link must never be replaced by this command")
+        self.assertIn(FULL_LINK, replies[0])
+        self.assertIn("НЕ создавалась", replies[0])
 
     def test_nonadmin_cannot_create_link(self):
         ns = functions()
@@ -243,6 +262,55 @@ class JoinDeliveryTests(unittest.TestCase):
 
         asyncio.run(ns["cmd_dolcelink"](SimpleNamespace(answer=answer, bot=bot)))
         self.assertEqual(replies, ["🔗 Актуальная ссылка для входа:\n" + FULL_LINK])
+
+
+class MessageEditTests(unittest.TestCase):
+    def _function(self):
+        class TelegramBadRequest(Exception):
+            pass
+
+        nodes = [
+            copy.deepcopy(n) for n in TREE.body
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "edit_moderation_status"
+        ]
+        self.assertEqual(len(nodes), 1)
+        env = {
+            "Message": object, "TelegramBadRequest": TelegramBadRequest,
+            "logger": logging.getLogger("test.join_requests"),
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "main.py", "exec"), env)
+        return env["edit_moderation_status"], TelegramBadRequest
+
+    def test_duplicate_edit_skipped_if_identical_and_no_buttons(self):
+        fn, _ = self._function()
+        class Msg:
+            text = "✅ Пользователь получил доступ к чату."
+            reply_markup = None
+            async def edit_text(self, text):
+                raise AssertionError("Telegram edit should not be called")
+        asyncio.run(fn(Msg(), Msg.text))
+
+    def test_telegram_message_not_modified_is_not_a_failed_unmute(self):
+        fn, TelegramBadRequest = self._function()
+        class Msg:
+            text = "Начальное сообщение"
+            reply_markup = object()
+            async def edit_text(self, text):
+                raise TelegramBadRequest(
+                    "Bad Request: message is not modified: specified new message content "
+                    "and reply markup are exactly the same"
+                )
+        asyncio.run(fn(Msg(), "✅ Пользователь получил доступ к чату."))
+
+    def test_unrelated_edit_errors_are_never_silenced(self):
+        fn, TelegramBadRequest = self._function()
+        class Msg:
+            text = "Исходное сообщение"
+            reply_markup = None
+            async def edit_text(self, text):
+                raise TelegramBadRequest("Bad Request: message to edit not found")
+        with self.assertRaisesRegex(TelegramBadRequest, "not found"):
+            asyncio.run(fn(Msg(), "✅ Пользователь получил доступ к чату."))
 
 
 if __name__ == "__main__":
