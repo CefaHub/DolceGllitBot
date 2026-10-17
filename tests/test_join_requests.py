@@ -264,5 +264,54 @@ class JoinDeliveryTests(unittest.TestCase):
         self.assertEqual(replies, ["🔗 Актуальная ссылка для входа:\n" + FULL_LINK])
 
 
+class MessageEditTests(unittest.TestCase):
+    def _function(self):
+        class TelegramBadRequest(Exception):
+            pass
+
+        nodes = [
+            copy.deepcopy(n) for n in TREE.body
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "edit_moderation_status"
+        ]
+        self.assertEqual(len(nodes), 1)
+        env = {
+            "Message": object, "TelegramBadRequest": TelegramBadRequest,
+            "logger": logging.getLogger("test.join_requests"),
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "main.py", "exec"), env)
+        return env["edit_moderation_status"], TelegramBadRequest
+
+    def test_duplicate_edit_skipped_if_identical_and_no_buttons(self):
+        fn, _ = self._function()
+        class Msg:
+            text = "✅ Пользователь получил доступ к чату."
+            reply_markup = None
+            async def edit_text(self, text):
+                raise AssertionError("Telegram edit should not be called")
+        asyncio.run(fn(Msg(), Msg.text))
+
+    def test_telegram_message_not_modified_is_not_a_failed_unmute(self):
+        fn, TelegramBadRequest = self._function()
+        class Msg:
+            text = "Начальное сообщение"
+            reply_markup = object()
+            async def edit_text(self, text):
+                raise TelegramBadRequest(
+                    "Bad Request: message is not modified: specified new message content "
+                    "and reply markup are exactly the same"
+                )
+        asyncio.run(fn(Msg(), "✅ Пользователь получил доступ к чату."))
+
+    def test_unrelated_edit_errors_are_never_silenced(self):
+        fn, TelegramBadRequest = self._function()
+        class Msg:
+            text = "Исходное сообщение"
+            reply_markup = None
+            async def edit_text(self, text):
+                raise TelegramBadRequest("Bad Request: message to edit not found")
+        with self.assertRaisesRegex(TelegramBadRequest, "not found"):
+            asyncio.run(fn(Msg(), "✅ Пользователь получил доступ к чату."))
+
+
 if __name__ == "__main__":
     unittest.main()
