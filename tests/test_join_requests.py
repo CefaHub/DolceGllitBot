@@ -198,6 +198,7 @@ class JoinDeliveryTests(unittest.TestCase):
 
     def test_bot_creates_join_request_link_and_saves_full_value(self):
         ns = functions()
+        ns["read_json"] = lambda *a: {}  # first run has no configured link
         saved = {}
         ns["write_json"] = lambda name, data: saved.update({"file": name, **data})
         bot = FakeBot()
@@ -216,6 +217,24 @@ class JoinDeliveryTests(unittest.TestCase):
         self.assertEqual(saved["link"], FULL_LINK)
         self.assertEqual(saved["chat_id"], -100123)
         self.assertIn(FULL_LINK, replies[0])
+
+    def test_cannot_regenerate_already_configured_invitation(self):
+        ns = functions()
+        bot = FakeBot()
+        replies = []
+
+        async def answer(text):
+            replies.append(text)
+
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=101),
+            bot=bot,
+            answer=answer,
+        )
+        asyncio.run(ns["cmd_dolcecreatelink"](message))
+        self.assertFalse(bot.created, "An active link must never be replaced by this command")
+        self.assertIn(FULL_LINK, replies[0])
+        self.assertIn("НЕ создавалась", replies[0])
 
     def test_nonadmin_cannot_create_link(self):
         ns = functions()
