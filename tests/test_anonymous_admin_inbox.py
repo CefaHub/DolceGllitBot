@@ -132,7 +132,7 @@ class AnonymousInboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("secret_user", sent["text"])
             self.assertNotIn("Secret Person", sent["text"])
             self.assertNotIn("/anon", sent["text"])
-        self.assertIn("анонимно", msg.answers[0][0])
+        self.assertIn("анонимный вопрос", msg.answers[0][0].casefold())
         markup = self.bot.sent[0]["reply_markup"]
         self.assertTrue(markup.inline_keyboard[0][0].callback_data.startswith("anon:reply:"))
         self.assertNotIn("99887766", repr(markup))
